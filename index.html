@@ -1,0 +1,2234 @@
+<div id="tmtNewsApp"></div>
+<script>
+(function(){
+  const LIST_TITLE  = "TMT & SI News";
+  const LIB_TITLE   = "Shared Documents";
+  const UPLOAD_SUB  = "News";
+  const LIKE_COUNT_COL  = "Likes Count";      // Number column
+  const LIKED_BY_COL    = "Liked By Users";   // Multiple lines of text (plain)
+  const VIEW_COUNT_COL  = "Views Count";       // Number column
+  const VIEWED_BY_COL   = "Viewed By Users";  // Multiple lines of text (plain)
+  // One-like/view per person enforced via these text columns (cross-device)
+
+  window.__TMT__ = window.__TMT__ || {};
+  const NS = window.__TMT__;
+  if(NS.hardInit){ tryBoot(); return; }
+  NS.hardInit = true;
+
+  function tryBoot(){
+    var r = document.getElementById("tmtNewsApp");
+    if(!r || r.__booted) return;
+    setTimeout(function(){
+      var r2 = document.getElementById("tmtNewsApp");
+      if(r2 && !r2.__booted) boot(r2);
+    }, 0);
+  }
+
+  if(!NS.obs){
+    NS.obs = new MutationObserver(function(){
+      var r = document.getElementById("tmtNewsApp");
+      if(r && !r.__booted && !r.querySelector(".tmt-shell")){ tryBoot(); }
+    });
+    NS.obs.observe(document.body, {childList:true, subtree:true});
+  }
+
+  document.addEventListener("DOMContentLoaded", tryBoot);
+  window.addEventListener("load", tryBoot);
+  tryBoot();
+
+  function boot(root){
+    root.__booted = true;
+    // Disconnect immediately — prevents SP DOM mutations from re-triggering boot
+    if(NS.obs){ try{ NS.obs.disconnect(); }catch(e){} NS.obs = null; }
+
+    var webAbs = (window._spPageContextInfo && _spPageContextInfo.webAbsoluteUrl)
+      || (location.origin + location.pathname.split("/SitePages/")[0]);
+    var webRel = (window._spPageContextInfo && _spPageContextInfo.webServerRelativeUrl)
+      || (location.pathname.split("/SitePages/")[0] || "");
+    var api      = webAbs.replace(/\/$/,"") + "/_api";
+    var libRel   = (webRel.replace(/\/$/,"") + "/" + LIB_TITLE).replace(/\/{2,}/g,"/");
+    var upFolder = (libRel.replace(/\/$/,"") + "/" + UPLOAD_SUB).replace(/\/{2,}/g,"/");
+
+    // ── tiny helpers ──────────────────────────
+    function $(s){ return root.querySelector(s); }
+    function on(el, ev, fn){ if(el) el.addEventListener(ev, fn); }
+    function esc(s){
+      return String(s == null ? "" : s)
+        .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+        .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+    }
+
+    function fmtDate(d){
+      if(!d) return "";
+      var dt = new Date(d); if(isNaN(dt)) return "";
+      return dt.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
+    }
+
+    function relTime(d){
+      if(!d) return "";
+      var dt = new Date(d); if(isNaN(dt)) return "";
+      var now = new Date(), ms = now - dt;
+      var mins = Math.floor(ms/60000), hrs = Math.floor(ms/3600000);
+      var today = new Date(now.getFullYear(),now.getMonth(),now.getDate());
+      var dDay  = new Date(dt.getFullYear(),dt.getMonth(),dt.getDate());
+      var dayD  = Math.round((today - dDay) / 86400000);
+      if(mins < 1)  return "Just now";
+      if(mins < 60) return mins === 1 ? "1 minute ago" : mins + " minutes ago";
+      if(hrs < 24 && dayD === 0) return hrs === 1 ? "1 hour ago" : hrs + " hours ago";
+      if(dayD === 1) return "Yesterday";
+      if(dayD < 7)  return dayD + " days ago";
+      if(dayD < 14) return "Last week";
+      if(dayD < 30) return Math.floor(dayD/7) + " weeks ago";
+      if(dayD < 365)return Math.floor(dayD/30) + " months ago";
+      return fmtDate(d);
+    }
+
+    function initials(name){
+      if(!name) return "?";
+      var p = name.trim().split(/\s+/);
+      return p.length === 1 ? p[0].slice(0,2).toUpperCase() : (p[0][0] + p[p.length-1][0]).toUpperCase();
+    }
+
+    function toIso(s){
+      if(!s) return null;
+      var d = new Date(s); if(!isNaN(d)) return d.toISOString();
+      var m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if(m) return new Date(+m[3],+m[1]-1,+m[2]).toISOString();
+      return null;
+    }
+
+    function normalizeUrl(u){
+      var s = String(u||"").trim(); if(!s) return "";
+      if(/^https?:\/\//i.test(s) || /^mailto:/i.test(s)) return s;
+      if(/^www\./i.test(s)) return "https://" + s;
+      if(s.startsWith("/")) return location.origin + s;
+      return "https://" + s;
+    }
+
+    function srvRel(absUrl){
+      var s = String(absUrl||"").trim(); if(!s) return "";
+      if(/^https?:\/\//i.test(s)){
+        try{ return decodeURIComponent(new URL(s).pathname); }catch(e){ return s; }
+      }
+      return s.startsWith("/") ? s : "/" + s;
+    }
+
+    function extOf(n){
+      var m = String(n||"").split("?")[0].match(/\.([A-Za-z0-9]+)$/);
+      return m ? m[1].toLowerCase() : "";
+    }
+
+    var VID_EXT = ["mp4","mov","m4v","webm"];
+    var OFF_EXT = ["ppt","pptx","doc","docx","xls","xlsx"];
+    function isVid(e){ return VID_EXT.indexOf(e) > -1; }
+    function isOff(e){ return OFF_EXT.indexOf(e) > -1; }
+    function isPdf(e){ return e === "pdf"; }
+
+    function linkify(text){
+      // Work on raw text — escape only non-URL segments to avoid regex char class
+      // excluding letters like t, l, ; that appear in &lt; &gt; entity names
+      var raw = String(text||"");
+      var urlRegex = /(https?:\/\/[^\s<>"']+)/gi;
+      var parts = raw.split(urlRegex);
+      return parts.map(function(part, i){
+        // Odd-indexed parts are URL matches
+        if(i % 2 === 1){
+          // Strip leading underscores or punctuation that got captured
+          var url = part.replace(/^[_*\s]+/, "").replace(/[.,;:!?)_]+$/, "");
+          if(!url) return esc(part);
+          return '<a href="'+esc(normalizeUrl(url))+'" target="_blank" rel="noopener" onclick="window.open(this.href,\'_blank\',\'noopener\');return false;">'+esc(url)+'</a>';
+        }
+        return esc(part);
+      }).join("");
+    }
+
+    // Convert a SharePoint sharing URL (/:p:/r/...) to a server-relative path
+    // that getpreview.ashx can use. Returns "" for GUID-only URLs.
+    function spShareToServerRel(url){
+      var m = String(url||"").match(/sharepoint\.com\/:[pwxbuf]:(?:\/r)?(\/sites\/[^?#]+)/i);
+      if(m) return decodeURIComponent(m[1]);
+      try{ return decodeURIComponent(new URL(url).pathname); }catch(e){ return ""; }
+    }
+
+    // SP getpreview.ashx — server-side thumbnail, no canvas/CSP issues
+    function previewUrl(attAbs){
+      var sr = srvRel(attAbs);
+      return webAbs.replace(/\/$/,"") + "/_layouts/15/getpreview.ashx?path=" + encodeURIComponent(sr) + "&resolution=2";
+    }
+
+    // SP stream URL for "open in SharePoint" link
+    function spStreamUrl(attAbs, attName){
+      var s   = String(attAbs||"").trim();
+      var ext = extOf(attName || attAbs);
+
+      // If the stored URL is already a Doc.aspx or sharing link, use it directly —
+      // don't try to extract the path from it, which would wrap it in another Doc.aspx
+      if(/\/_layouts\/15\/Doc\.aspx/i.test(s)) return s;
+      if(/sharepoint\.com\/:(?:p|w|x|b|u|f):/i.test(s)) return s;
+
+      var sr = srvRel(s);
+      if(isVid(ext)) return location.origin + "/_layouts/15/stream.aspx?id=" + encodeURIComponent(sr);
+      if(isOff(ext) || isPdf(ext)) return location.origin + "/_layouts/15/Doc.aspx?path=" + encodeURIComponent(sr) + "&action=default";
+      return location.origin + sr;
+    }
+
+    var yn = function(v){ return ["yes","y","true","1"].indexOf(String(v||"").trim().toLowerCase()) > -1 ? "Yes" : "No"; };
+
+    // Current user — fetched first so renderGrid has it before painting cards
+    var currentUser = "";
+    try{
+      if(window._spPageContextInfo){
+        currentUser = _spPageContextInfo.userDisplayName || _spPageContextInfo.userLoginName || "";
+      }
+    }catch(e){}
+
+    function loadCurrentUser(){
+      if(currentUser) return Promise.resolve(currentUser);
+      return fetch(api+"/web/currentuser?$select=Title", {headers:{Accept:"application/json;odata=verbose"}})
+        .then(function(r){ return r.json(); })
+        .then(function(j){ if(j.d&&j.d.Title) currentUser = j.d.Title; return currentUser; })
+        .catch(function(){ return currentUser; });
+    }
+
+    // ── SP REST ───────────────────────────────
+    function getDigest(){
+      return fetch(api + "/contextinfo", {method:"POST", headers:{Accept:"application/json;odata=verbose"}})
+        .then(function(r){ if(!r.ok) throw new Error("Digest "+r.status); return r.json(); })
+        .then(function(j){ return j.d.GetContextWebInformation.FormDigestValue; });
+    }
+
+    function spGet(url){
+      return fetch(url, {headers:{Accept:"application/json;odata=verbose"}})
+        .then(function(r){
+          if(!r.ok){ var e = new Error("GET "+r.status); e.status = r.status; throw e; }
+          return r.json();
+        });
+    }
+
+    function spPost(url, body, dg, method){
+      var h = {Accept:"application/json;odata=verbose","Content-Type":"application/json;odata=verbose","X-RequestDigest":dg};
+      if(method) h["X-HTTP-Method"] = method;
+      if(method === "MERGE" || method === "DELETE") h["IF-MATCH"] = "*";
+      return fetch(url, {method:"POST", headers:h, body: body ? JSON.stringify(body) : null})
+        .then(function(r){
+          if(!r.ok) return r.text().then(function(t){ throw new Error((method||"POST")+" "+r.status+": "+t); });
+          return r;
+        });
+    }
+
+    // ── List metadata ─────────────────────────
+    var fieldMap = {}, entityType = "";
+    var likeCountField = "", likedByField = "", viewCountField = "", viewedByField = "";
+    var categoryChoices = []; // choices defined in the SP Category column
+
+    function loadMeta(){
+      var enc = encodeURIComponent(LIST_TITLE).replace(/%20/g," ");
+      return Promise.all([
+        spGet(api+"/web/lists/GetByTitle('"+enc+"')/Fields?$select=Title,InternalName,TypeAsString,Choices"),
+        spGet(api+"/web/lists/GetByTitle('"+enc+"')?$select=ListItemEntityTypeFullName")
+      ]).then(function(results){
+        var fj = results[0], lj = results[1];
+        (fj.d.results||[]).forEach(function(f){
+          var title = String(f.Title||"").trim();
+          fieldMap[title] = {n: f.InternalName, t: f.TypeAsString};
+          var tl = title.toLowerCase();
+          if(tl === LIKE_COUNT_COL.toLowerCase())  likeCountField = f.InternalName;
+          if(tl === LIKED_BY_COL.toLowerCase())    likedByField   = f.InternalName;
+          if(tl === VIEW_COUNT_COL.toLowerCase())  viewCountField = f.InternalName;
+          if(tl === VIEWED_BY_COL.toLowerCase())   viewedByField  = f.InternalName;
+          // Capture choices from the Category column
+          if(tl === "category" && f.Choices && f.Choices.results){
+            categoryChoices = f.Choices.results.map(function(c){ return String(c).trim(); }).filter(Boolean);
+          }
+        });
+        entityType = lj.d.ListItemEntityTypeFullName;
+// field names resolved in loadMeta
+      });
+    }
+
+    function fi(disp){ return fieldMap[disp] ? fieldMap[disp].n : null; }
+    function fiv(row, disp){ var n = fi(disp); return (n && row[n] !== undefined) ? row[n] : row[disp]; }
+
+    // ── Upload ────────────────────────────────
+    function ensureFolder(dg){
+      var enc = encodeURIComponent(upFolder).replace(/%20/g," ");
+      return spGet(api+"/web/GetFolderByServerRelativeUrl('"+enc+"')")
+        .then(function(){ return; })
+        .catch(function(e){
+          if(e.status !== 404) throw e;
+          var encLib = encodeURIComponent(libRel).replace(/%20/g," ");
+          return spGet(api+"/web/GetFolderByServerRelativeUrl('"+encLib+"')")
+            .catch(function(){ throw new Error('Library "'+LIB_TITLE+'" not found'); })
+            .then(function(){
+              return fetch(api+"/web/folders/add('"+enc+"')",
+                {method:"POST", headers:{Accept:"application/json;odata=verbose","X-RequestDigest":dg}})
+                .then(function(r){ if(!r.ok) throw new Error("Could not create upload folder"); });
+            });
+        });
+    }
+
+    function uploadFile(file, dg){
+      return ensureFolder(dg).then(function(){
+        var safe = file.name.replace(/[^\w.\- ()]/g,"_");
+        var pts  = safe.split("."), ext = pts.length > 1 ? pts.pop() : "", base = pts.join(".")||"file";
+        var name = ext ? (base+"-"+Date.now().toString(36)+"."+ext) : (base+"-"+Date.now().toString(36));
+        var enc  = encodeURIComponent(upFolder).replace(/%20/g," ");
+        var encN = encodeURIComponent(name).replace(/%20/g," ");
+        var url  = api+"/web/GetFolderByServerRelativeUrl('"+enc+"')/Files/add(url='"+encN+"',overwrite=true)";
+
+        return new Promise(function(readResolve, readReject){
+          var reader = new FileReader();
+          reader.onload = function(e){ readResolve(e.target.result); };
+          reader.onerror = function(){ readReject(new Error("Could not read file")); };
+          reader.readAsArrayBuffer(file);
+        }).then(function(buf){
+          return new Promise(function(resolve, reject){
+            var xhr = new XMLHttpRequest();
+            xhr.open("POST", url, true);
+            xhr.setRequestHeader("Accept","application/json;odata=verbose");
+            xhr.setRequestHeader("X-RequestDigest", dg);
+            xhr.setRequestHeader("Content-Type","application/octet-stream");
+            xhr.upload.onprogress = function(evt){
+              if(!evt.lengthComputable) return;
+              var p = Math.round(evt.loaded/evt.total*100);
+              var pf = $("#pFill"); if(pf) pf.style.width = p+"%";
+              var pp = $("#pPct");  if(pp) pp.textContent = p+"%";
+              var pl = $("#pLabel");if(pl) pl.textContent = p < 100 ? "Uploading…" : "Processing…";
+            };
+            xhr.onload = function(){
+              if(xhr.status === 200 || xhr.status === 201){
+                var d = JSON.parse(xhr.responseText);
+                // Use location.origin + serverRelativeUrl (same as reference app).
+                // webAbs already contains the site path so adding serverRelativeUrl
+                // would double it: /sites/X/sites/X/... — always wrong.
+                var fileUrl = location.origin + d.d.ServerRelativeUrl;
+                resolve({ abs: fileUrl, name: name });
+              } else { reject(new Error("Upload failed: "+xhr.status)); }
+            };
+            xhr.onerror = function(){ reject(new Error("Network error during upload")); };
+            xhr.send(buf);
+          });
+        });
+      });
+    }
+
+    // ── State ─────────────────────────────────
+    var S = { items:[], cats:["All"], cat:"All", sort:"newest", q:"", file:null, editId:null, view:"grid" };
+
+    // ── Load items ────────────────────────────
+    function loadItems(){
+      var enc = encodeURIComponent(LIST_TITLE).replace(/%20/g," ");
+      var url = api+"/web/lists/GetByTitle('"+enc+"')/items"
+        + "?$select=*,Author/Title&$expand=Author&$top=200";
+
+      return spGet(url).then(function(json){
+        var now = new Date();
+        S.items = (json.d.results||[]).map(function(r){
+          var pub = fiv(r,"Publish Date") || r.Created;
+          var exp = fiv(r,"Expires On");
+          var expDt = exp ? new Date(exp) : null;
+          var attRaw = (fiv(r,"Attachment URL")||"").trim();
+          return {
+            id: r.Id,
+            headline: (fiv(r,"Headline") || r.Title || "").trim(),
+            body:     (fiv(r,"Body") || fiv(r,"Summary") || "").trim(),
+            link:      normalizeUrl((fiv(r,"Link")||"").trim()),
+            category: (fiv(r,"Category") || "General").trim(),
+            featured:  String(fiv(r,"Featured") || "No"),
+            publishDate: pub,
+            // Use Id as primary sort key for "newest" since it's always sequential.
+            // publishTime used for "oldest" where actual date matters.
+            publishTime: new Date(pub||0).getTime() || 0,
+            spId: r.Id, // sequential SP item ID — reliable newest-first sort
+            attachmentUrl:  attRaw ? normalizeUrl(attRaw) : "",
+            attachmentName: (fiv(r,"Attachment Name")||"").trim(),
+            author: (r.Author && r.Author.Title) ? r.Author.Title : "",
+            likeCount: 0, likedBy: "",
+            viewCount: 0, viewedBy: "",
+            expired: !!(expDt && !isNaN(expDt) && expDt < now)
+          };
+        }).filter(function(x){ return !x.expired; });
+
+        // Build category list: merge item-derived cats with SP column choices
+        var cats = [];
+        S.items.forEach(function(i){ if(i.category && cats.indexOf(i.category)<0) cats.push(i.category); });
+        // Add any SP column choices not already represented by existing items
+        categoryChoices.forEach(function(c){ if(cats.indexOf(c) < 0) cats.push(c); });
+        cats.sort();
+        S.cats = ["All"].concat(cats);
+
+        $("#tmtCat").innerHTML = S.cats.map(function(c){
+          return '<option value="'+esc(c)+'"'+(S.cat===c?" selected":"")+'>'+esc(c)+'</option>';
+        }).join("");
+
+        // Form dropdown uses full SP choices list (all defined options, not just used ones)
+        var formCats = categoryChoices.length ? categoryChoices.slice().sort() : (cats.length ? cats : ["General"]);
+        $("#fCategory").innerHTML = formCats.map(function(c){
+          return '<option value="'+esc(c)+'">'+esc(c)+'</option>';
+        }).join("");
+
+        renderGrid();
+
+        // Fetch like/view data separately using explicit internal field names
+        var countFields = ["Id", likeCountField, likedByField, viewCountField, viewedByField].filter(Boolean);
+        if(countFields.length > 1){
+          spGet(api+"/web/lists/GetByTitle('"+enc+"')/items?$select="+countFields.join(",")+"&$top=200")
+            .then(function(lj){
+              var changed = false;
+              (lj.d.results||[]).forEach(function(lr){
+                var item = S.items.filter(function(x){ return x.id === lr.Id; })[0];
+                if(!item) return;
+                if(likeCountField) item.likeCount = parseInt(lr[likeCountField]||0,10)||0;
+                if(likedByField)   item.likedBy   = String(lr[likedByField]||"").trim();
+                if(viewCountField) item.viewCount = parseInt(lr[viewCountField]||0,10)||0;
+                if(viewedByField)  item.viewedBy  = String(lr[viewedByField]||"").trim();
+                changed = true;
+              });
+              if(changed) renderGrid();
+            }).catch(function(e){ console.warn("[TMT] Count fetch failed:", e.message); });
+        }
+      });
+    }
+
+    function filtered(){
+      var a = S.items.slice();
+      if(S.cat !== "All") a = a.filter(function(i){ return i.category === S.cat; });
+      if(S.q){
+        var q = S.q.toLowerCase();
+        a = a.filter(function(i){ return (i.headline+" "+i.body+" "+i.category).toLowerCase().indexOf(q) > -1; });
+      }
+      a.sort(function(a,b){
+        var af = ["yes","true","1"].indexOf(String(a.featured).toLowerCase()) > -1;
+        var bf = ["yes","true","1"].indexOf(String(b.featured).toLowerCase()) > -1;
+        if(af !== bf) return af ? -1 : 1;
+        // Newest: sort by SP item Id descending (always sequential, never wrong)
+        // Oldest: sort by actual publish date ascending
+        if(S.sort === "oldest") return a.publishTime - b.publishTime;
+        return b.spId - a.spId;
+      });
+      return a;
+    }
+
+    // ── Thumbnail HTML ────────────────────────
+    var CAT_COLORS = {
+      "Leadership":"#63DF4E","Enablement":"#60A5FA","Win Story":"#34D399","Win":"#34D399",
+      "Best Practices":"#FBBF24","POC Spotlight":"#F472B6","Culture":"#FB923C",
+      "General":"#81B5A1","AI":"#FF7EB3","IT":"#4A9EFF","CRM":"#FF6B8A",
+      "Video":"#A78BFA","News":"#9BB8C8",
+      "Pipeline":"#F59E0B","Competitive":"#EF4444","Product":"#8B5CF6",
+      "Telco":"#06B6D4","Media":"#EC4899","Technology":"#3B82F6",
+      "System Integrators":"#10B981","Moveworks":"#F97316","People":"#84CC16",
+      "Other":"#6B7280"
+    };
+    function catColor(cat){ return CAT_COLORS[cat] || "#5E8899"; }
+
+    // Cache extracted poster frames so we don't re-extract on every renderGrid call
+    var posterCache = {};
+    // Cache for og:image thumbnails fetched from linked URLs
+    var ogCache = {};
+
+    function thumbHtml(item){
+      var att  = item.attachmentUrl || "";
+      var link = item.link || "";
+      var cat  = item.category || "General";
+      var col  = catColor(cat);
+
+      // ── Resolve extension & file type ──────────────────────────────────────
+      var nameForExt = item.attachmentName || "";
+      if(!nameForExt && att){
+        var fp = att.match(/[?&]file=([^&]+)/i);
+        if(fp) nameForExt = decodeURIComponent(fp[1]);
+      }
+      var ext = extOf(nameForExt || att);
+      // SharePoint sharing URL type character: /:p:/, /:p:/r/, /:w:/, etc.
+      if(att && !isOff(ext) && !isVid(ext)){
+        var tcM2 = att.match(/sharepoint\.com\/:([pwxb])(?:\/r)?:/i);
+        if(tcM2){ var tcMap2={p:"pptx",w:"docx",x:"xlsx",b:"pdf"}; ext=tcMap2[tcM2[1].toLowerCase()]||ext; }
+        if(!isOff(ext) && /Doc2?\.aspx/i.test(att) && /sourcedoc=/i.test(att)) ext="pptx";
+      }
+      var vid = isVid(ext);
+      var off = isOff(ext);
+      var playOverlay = '<div class="playOverlay" style="z-index:2;"><div class="playBtn"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div></div>';
+
+      // ── Helper: Office icon placeholder ────────────────────────────────────
+      function offPlaceholder(e, extraAttrs){
+        var icons={pptx:"📊",ppt:"📊",docx:"📝",doc:"📝",xlsx:"📈",xls:"📈",pdf:"📄"};
+        var cols={pptx:"#C43E1C",ppt:"#C43E1C",docx:"#185ABD",doc:"#185ABD",xlsx:"#107C41",xls:"#107C41",pdf:"#E74C3C"};
+        var ic=icons[e]||"📄", fc=cols[e]||"#5E8899";
+        return '<div class="thumb" style="background:linear-gradient(135deg,#01131D,#053347);"'+(extraAttrs||"")+'>'
+          +'<div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;">'
+          +'<div style="font-size:36px;">'+ic+'</div>'
+          +'<div style="font-size:9px;font-weight:900;letter-spacing:1px;text-transform:uppercase;padding:2px 10px;border-radius:999px;background:'+fc+'22;color:'+fc+';border:1px solid '+fc+'44;">'+e.toUpperCase()+'</div>'
+          +'</div></div>';
+      }
+
+      // ── Helper: domain link placeholder ────────────────────────────────────
+      function domainPlaceholder(url){
+        var d=""; try{ d=new URL(url).hostname.replace(/^www\./,""); }catch(e2){}
+        return '<div class="thumb" style="background:linear-gradient(135deg,#01131D,#053347);">'
+          +'<div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:16px;">'
+          +'<div style="font-size:24px;opacity:0.5;">🔗</div>'
+          +(d?'<div style="font-size:10px;color:#5E8899;text-align:center;font-weight:700;word-break:break-all;max-width:140px;">'+esc(d)+'</div>':"")
+          +'</div></div>';
+      }
+
+      // ── Helper: getpreview.ashx thumbnail ──────────────────────────────────
+      function previewThumb(fileUrl){
+        var sr = srvRel(fileUrl);
+        var prev = location.origin+"/_layouts/15/getpreview.ashx?path="+encodeURIComponent(sr)+"&resolution=2";
+        return '<div class="thumb" style="background:linear-gradient(135deg,#01131D,#053347);">'
+          +'<img src="'+esc(prev)+'" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;" onerror="this.remove()" />'
+          +'</div>';
+      }
+
+      // ══════════════════════════════════════════════════════════════════════
+      // CASE 1: Video attachment
+      // ══════════════════════════════════════════════════════════════════════
+      if(vid && att){
+        if(posterCache[att]){
+          return '<div class="thumb" style="background:#000;">'
+            +'<img src="'+esc(posterCache[att])+'" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;" />'
+            +playOverlay+'</div>';
+        }
+        return '<div class="thumb" style="background:linear-gradient(135deg,#01131D,#053347);" data-vidurl="'+esc(att)+'">'
+          +'<div class="thumbPlaceholder" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;">'
+          +'<div style="width:42px;height:42px;border-radius:50%;border:2px solid rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;opacity:.5;">'
+          +'<svg width="16" height="16" viewBox="0 0 24 24" fill="#9BB8C8"><path d="M8 5v14l11-7z"/></svg></div>'
+          +'<div style="font-size:9px;color:#5E8899;text-transform:uppercase;letter-spacing:1px;">Loading preview…</div>'
+          +'</div>'+playOverlay+'</div>';
+      }
+
+      // ══════════════════════════════════════════════════════════════════════
+      // CASE 2: Office / PDF attachment with a direct file path
+      // getpreview.ashx works with same-tenant server-relative paths
+      // ══════════════════════════════════════════════════════════════════════
+      if(att && (off || isPdf(ext))){
+        // GUID-only sharing links can't be resolved by getpreview.ashx
+        var hasGuidOnly = /sourcedoc=/i.test(att) && !/[?&]file=/i.test(att) && (function(){
+          if(!/sharepoint\.com\/:/.test(att)) return true; // no type char = definitely GUID-only
+          var sr = spShareToServerRel(att) || srvRel(att);
+          return !sr || /\/_layouts\//i.test(sr); // type char but resolves to /_layouts/ = still GUID-only
+        })();
+        var isExternal = !/sharepoint\.com/i.test(att) && !/^\//i.test(att)
+          && /^https?:/i.test(att) && att.indexOf(location.hostname.split(".")[0]) === -1;
+        if(hasGuidOnly || isExternal){
+          var guidM2 = att.match(/sourcedoc=%7B([^%]+)%7D/i)||att.match(/sourcedoc=\{([^}]+)\}/i);
+          var guidAttr2 = guidM2 ? ' data-guid="'+esc(guidM2[1])+'"' : '';
+          return offPlaceholder(ext, guidAttr2);
+        }
+        // For sharing URLs (/:p:/r/...) extract the real server-relative path
+        var sr2;
+        var fp3 = att.match(/[?&]file=([^&]+)/i);
+        if(fp3){
+          var folderPath = spShareToServerRel(att.split("?")[0]) || srvRel(att.split("?")[0]);
+          folderPath = folderPath.replace(/\/[^/]+$/, "");
+          sr2 = folderPath + "/" + decodeURIComponent(fp3[1]);
+        } else if(/sharepoint\.com\/:/.test(att)){
+          sr2 = spShareToServerRel(att);
+        } else {
+          sr2 = srvRel(att);
+        }
+        // If path can't be resolved or goes through /_layouts/, show icon
+        if(!sr2 || /\/_layouts\//i.test(sr2)){
+          return offPlaceholder(ext);
+        }
+        var prev2 = location.origin+"/_layouts/15/getpreview.ashx?path="+encodeURIComponent(sr2)+"&resolution=2";
+        return '<div class="thumb" style="background:linear-gradient(135deg,#01131D,#053347);">'
+          +'<img src="'+esc(prev2)+'" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;" onerror="this.parentNode.innerHTML=\''+offPlaceholder(ext).replace(/'/g,"\\'").replace(/\\/g,"\\\\")+'\'" />'
+          +'</div>';
+      }
+
+      // ══════════════════════════════════════════════════════════════════════
+      // CASE 3: Image attachment — display directly
+      // ══════════════════════════════════════════════════════════════════════
+      if(att && ["jpg","jpeg","png","gif","webp","bmp","svg"].indexOf(ext) > -1){
+        var imgUrl = location.origin + srvRel(att);
+        return '<div class="thumb" style="background:#000;">'
+          +'<img src="'+esc(imgUrl)+'" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;" onerror="this.remove()" />'
+          +'</div>';
+      }
+
+      // ══════════════════════════════════════════════════════════════════════
+      // CASE 4: Any other attachment — try getpreview.ashx, fall back to icon
+      // ══════════════════════════════════════════════════════════════════════
+      if(att){
+        return previewThumb(att);
+      }
+
+      // ══════════════════════════════════════════════════════════════════════
+      // CASE 5: No attachment — use link for thumbnail
+      // ══════════════════════════════════════════════════════════════════════
+      if(link){
+        // YouTube: instant thumbnail from known pattern
+        var ytM = link.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+        if(ytM){
+          var ytImg = "https://img.youtube.com/vi/"+ytM[1]+"/mqdefault.jpg";
+          if(!ogCache[link]) ogCache[link] = ytImg;
+          return '<div class="thumb" style="background:#000;">'
+            +'<img src="'+esc(ytImg)+'" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;" />'
+            +'<div style="position:absolute;bottom:6px;right:8px;background:rgba(0,0,0,.6);border-radius:4px;padding:2px 7px;font-size:9px;color:#9BB8C8;font-weight:700;">▶ YouTube</div>'
+            +'</div>';
+        }
+
+        // Cached og:image from a previous fetch
+        var ogImg = ogCache[link];
+        if(ogImg){
+          return '<div class="thumb" style="background:#000;">'
+            +'<img src="'+esc(ogImg)+'" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;" onerror="this.remove()" />'
+            +'<div style="position:absolute;bottom:6px;right:8px;background:rgba(0,0,0,.6);border-radius:4px;padding:2px 7px;font-size:9px;color:#9BB8C8;font-weight:700;">🔗 LINK</div>'
+            +'</div>';
+        }
+
+        // Auth-gated or failed fetch — show domain immediately, no spinner
+        if(isSkippedDomain(link) || ogImg === ""){
+          // SharePoint file links — try getpreview.ashx same as attachments
+          var spFileLink = /sharepoint\.com/i.test(link) && (
+            /sharepoint\.com\/:([pwxb])(?:\/r)?:/i.test(link) ||  // sharing URL type char
+            /\.(pptx?|docx?|xlsx?|pdf)(\?|$)/i.test(link) ||      // direct file URL
+            /Doc2?\.aspx/i.test(link)                              // Doc.aspx viewer
+          );
+          if(spFileLink){
+            // Detect file type — type char > file extension > Doc.aspx default to pptx
+            var spTcM = link.match(/sharepoint\.com\/:([ pwxb]):(?:\/r)?:/i);
+            var spTcMap3 = {p:"pptx",w:"docx",x:"xlsx",b:"pdf"};
+            var spExt3 = (spTcM && spTcMap3[spTcM[1].toLowerCase()])
+              || (/\.(pptx?|docx?|xlsx?|pdf)(\?|$)/i.test(link) ? extOf(link) : null)
+              || (/Doc2?\.aspx/i.test(link) ? "pptx" : null)
+              || "pptx";
+
+            // Extract GUID if present
+            var spGuidMatch = link.match(/sourcedoc=%7B([^%]+)%7D/i) || link.match(/sourcedoc=\{([^}]+)\}/i);
+            var spGuid = spGuidMatch ? spGuidMatch[1] : "";
+            var spGuidAttr = spGuid ? ' data-guid="'+esc(spGuid)+'"' : '';
+
+            // A URL is GUID-only if it has sourcedoc= but no &file= param
+            // AND either has no type-char prefix, OR its resolved path goes through /_layouts/
+            // (meaning it's a viewer URL like Doc2.aspx, not a direct file path)
+            var spSrCheck = spShareToServerRel(link) || srvRel(link);
+            var spIsGuidOnly = /sourcedoc=/i.test(link) && !/[?&]file=/i.test(link)
+              && (!spSrCheck || /\/_layouts\//i.test(spSrCheck));
+
+            if(spIsGuidOnly){
+              return offPlaceholder(spExt3, spGuidAttr);
+            }
+            var spSr = spShareToServerRel(link) || srvRel(link);
+            var spFp = link.match(/[?&]file=([^&]+)/i);
+            if(spFp){
+              var spFolder = spSr.replace(/\/[^/]+$/, "");
+              spSr = spFolder + "/" + decodeURIComponent(spFp[1]);
+            }
+            if(!spSr || /\/_layouts\//i.test(spSr)){
+              return offPlaceholder(spExt3, spGuidAttr);
+            }
+            var spPrev = location.origin+"/_layouts/15/getpreview.ashx?path="+encodeURIComponent(spSr)+"&resolution=2";
+            return '<div class="thumb" style="background:linear-gradient(135deg,#01131D,#053347);">'
+              +'<img src="'+esc(spPrev)+'" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;" '
+              +'onerror="this.parentNode.innerHTML=\''+offPlaceholder(spExt3).replace(/'/g,"\\'").replace(/\\/g,"\\\\")+'\'">'
+              +'</div>';
+          }
+          // Zoom gets a branded placeholder
+          var isZoom = /zoom\.us/i.test(link);
+          if(isZoom){
+            return '<div class="thumb" style="background:linear-gradient(135deg,#0E72ED,#1A82FF);">'
+              +'<div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;">'
+              +'<div style="width:52px;height:52px;border-radius:14px;background:#fff;display:flex;align-items:center;justify-content:center;">'
+              +'<svg viewBox="0 0 40 40" width="34" height="34"><rect width="40" height="40" rx="8" fill="#0E72ED"/>'
+              +'<path d="M6 14a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V14zm22 2.5 5.6-4.2A1 1 0 0 1 35 13v14a1 1 0 0 1-1.4.9L28 23.5v-7z" fill="#fff"/></svg>'
+              +'</div>'
+              +'<div style="font-size:11px;font-weight:800;color:rgba(255,255,255,.9);letter-spacing:.5px;">Zoom Recording</div>'
+              +'</div></div>';
+          }
+          return domainPlaceholder(link);
+        }
+
+        // Unknown — show spinner while fetchOgImages runs async
+        return '<div class="thumb" style="background:linear-gradient(135deg,#01131D,#053347);" data-ogurl="'+esc(link)+'">'
+          +'<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;">'
+          +'<div style="font-size:22px;opacity:0.5;">🔗</div>'
+          +'<div style="font-size:9px;color:#5E8899;text-transform:uppercase;letter-spacing:1px;">Loading preview…</div>'
+          +'</div></div>';
+      }
+
+      // ══════════════════════════════════════════════════════════════════════
+      // CASE 6: No attachment, no link — category color placeholder
+      // ══════════════════════════════════════════════════════════════════════
+      return '<div class="thumb" style="background:linear-gradient(135deg,#01131D,#053347);">'
+        +'<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">'
+        +'<div style="font-size:10px;font-weight:900;letter-spacing:1px;text-transform:uppercase;padding:4px 12px;border-radius:999px;background:'+col+'22;color:'+col+';border:1px solid '+col+'44;">'+esc(cat)+'</div>'
+        +'</div></div>';
+    }
+
+    // Domains that require auth — skip og:image fetch, show placeholder immediately
+    var SKIP_OG_DOMAINS = ["zoom.us","teams.microsoft.com","microsoftstream.com",
+      "web.microsoftstream.com","login.microsoftonline.com","linkedin.com","salesforce.com",
+      "sharepoint.com"]; // SP requires auth — can't fetch og:image via proxy
+
+    function isSkippedDomain(url){
+      try{
+        var host = new URL(url).hostname.replace(/^www\./,"");
+        return SKIP_OG_DOMAINS.some(function(d){ return host === d || host.endsWith("."+d); });
+      }catch(e){ return false; }
+    }
+
+    function fetchOgImages(items){
+      items.forEach(function(item){
+        if(item.attachmentUrl) return;
+        if(!item.link) return;
+        if(ogCache[item.link] !== undefined) return;
+
+        ogCache[item.link] = null;
+
+        // YouTube: instant thumbnail, no fetch needed
+        var ytMatch = item.link.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+        if(ytMatch){
+          ogCache[item.link] = "https://img.youtube.com/vi/" + ytMatch[1] + "/mqdefault.jpg";
+          injectOgThumb(item.link, ogCache[item.link]);
+          return;
+        }
+
+        // Skip auth-gated domains — they'll never return a public og:image
+        if(isSkippedDomain(item.link)){
+          ogCache[item.link] = ""; // cache empty so thumbHtml shows domain placeholder immediately
+          // Trigger re-render of this card's thumb without full renderGrid
+          var thumbEl = root.querySelector('[data-ogurl="'+item.link+'"]');
+          if(thumbEl){
+            var domain2 = "";
+            try{ domain2 = new URL(item.link).hostname.replace(/^www\./,""); }catch(e){}
+            thumbEl.removeAttribute("data-ogurl");
+            thumbEl.innerHTML =
+              '<div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:16px;">'
+              + '<div style="font-size:24px;opacity:0.5;">🔗</div>'
+              + (domain2 ? '<div style="font-size:10px;color:#5E8899;text-align:center;font-weight:700;letter-spacing:.3px;word-break:break-all;max-width:140px;">'+esc(domain2)+'</div>' : "")
+              + '</div>';
+          }
+          return;
+        }
+
+        // General fetch with 5s timeout
+        var done = false;
+        var timer = setTimeout(function(){
+          if(done) return; done = true;
+          ogCache[item.link] = "";
+          clearOgPlaceholder(item.link);
+        }, 5000);
+
+        fetch("https://api.allorigins.win/get?url=" + encodeURIComponent(item.link))
+          .then(function(r){ return r.json(); })
+          .then(function(data){
+            if(done) return; done = true; clearTimeout(timer);
+            var html = data.contents || "";
+            var m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
+                  || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+            if(m && m[1]){
+              ogCache[item.link] = m[1];
+              injectOgThumb(item.link, m[1]);
+            } else {
+              ogCache[item.link] = "";
+              clearOgPlaceholder(item.link);
+            }
+          })
+          .catch(function(){
+            if(done) return; done = true; clearTimeout(timer);
+            ogCache[item.link] = "";
+            clearOgPlaceholder(item.link);
+          });
+      });
+    }
+
+    function injectOgThumb(link, imgUrl){
+      var thumbs = root.querySelectorAll('[data-ogurl="'+link+'"]');
+      thumbs.forEach(function(thumb){
+        thumb.removeAttribute("data-ogurl");
+        thumb.style.background = "#000";
+        thumb.innerHTML =
+          '<img src="'+esc(imgUrl)+'" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;" onerror="this.remove()" />'
+          + '<div style="position:absolute;bottom:6px;right:8px;background:rgba(0,0,0,.6);border-radius:4px;padding:2px 7px;font-size:9px;color:#9BB8C8;font-weight:700;">🔗 LINK</div>';
+      });
+    }
+
+    function clearOgPlaceholder(link){
+      var thumbs = root.querySelectorAll('[data-ogurl="'+link+'"]');
+      var domain = "";
+      try{ domain = new URL(link).hostname.replace(/^www\./,""); }catch(e){}
+      var col = catColor("General");
+      thumbs.forEach(function(thumb){
+        thumb.removeAttribute("data-ogurl");
+        thumb.style.background = "linear-gradient(135deg,#01131D,#053347)";
+        thumb.innerHTML =
+          '<div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:16px;">'
+          + '<div style="font-size:24px;opacity:0.5;">🔗</div>'
+          + (domain ? '<div style="font-size:10px;color:#5E8899;text-align:center;font-weight:700;letter-spacing:.3px;word-break:break-all;max-width:140px;">'+esc(domain)+'</div>' : "")
+          + '</div>';
+      });
+    }
+
+    function thumbEmailBtn(item){
+      var subject = encodeURIComponent("Base Camp: " + (item.headline || "News Update"));
+      var postUrl = location.href.split("#")[0] + "#post-" + item.id;
+      var body = encodeURIComponent((item.headline||"") + "\n\n" + (item.body||"").slice(0,200) + "\n\nRead more: " + postUrl);
+      return '<a class="thumbShare" href="mailto:?subject='+subject+'&body='+body+'" title="Share via email" onclick="event.stopPropagation();">📧</a>';
+    }
+    // Uses the same-origin URL that works for video playback — canvas can read it too.
+    // Resolve GUID-based sourcedoc URLs to real file paths so getpreview.ashx can generate thumbnails.
+    // Uses SP REST GetFileById to get the ServerRelativeUrl from the GUID.
+    var guidCache = {};
+
+    function resolveGuidThumbnails(items){
+      items.forEach(function(item){
+        var urls = [item.attachmentUrl, item.link].filter(Boolean);
+        urls.forEach(function(url){
+          if(!/sourcedoc=/i.test(url)) return;
+          if(/[?&]file=/i.test(url)) return;
+          var guidMatch = url.match(/sourcedoc=%7B([^%]+)%7D/i) || url.match(/sourcedoc=\{([^}]+)\}/i);
+          if(!guidMatch) return;
+          var guid = guidMatch[1];
+          if(guidCache[guid]) return;
+          guidCache[guid] = true;
+
+          // getpreview.ashx supports UniqueId directly — no cross-site API call needed
+          var prevUrl = location.origin+"/_layouts/15/getpreview.ashx?UniqueId="+encodeURIComponent("{"+guid+"}")+"&resolution=2";
+          root.querySelectorAll('.thumb[data-guid="'+guid+'"]').forEach(function(thumb){
+            thumb.removeAttribute("data-guid");
+            var img = document.createElement("img");
+            img.src = prevUrl;
+            img.alt = "";
+            img.style.cssText = "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;transition:transform .3s;";
+            img.onerror = function(){ img.remove(); };
+            thumb.innerHTML = "";
+            thumb.style.background = "linear-gradient(135deg,#01131D,#053347)";
+            thumb.appendChild(img);
+          });
+        });
+      });
+    }
+
+    function extractVideoFrames(items){
+      items.forEach(function(item){
+        var att = item.attachmentUrl;
+        if(!att) return;
+        var ext = extOf(item.attachmentName || att);
+        if(!isVid(ext)) return;
+        if(posterCache[att]) return;
+
+        var sr = srvRel(att);
+        var videoUrl = location.origin + sr;
+
+        var v = document.createElement("video");
+        v.preload = "metadata";
+        v.muted = true;
+        v.playsInline = true;
+        v.crossOrigin = "use-credentials"; // same-origin SP request needs credentials
+        v.src = videoUrl;
+
+        v.onloadeddata = function(){
+          var dur = isFinite(v.duration) && v.duration > 0 ? v.duration : 4;
+          v.currentTime = Math.min(dur * 0.1, 2);
+        };
+
+        v.onseeked = function(){
+          try{
+            var c = document.createElement("canvas");
+            c.width = 640; c.height = 360;
+            c.getContext("2d").drawImage(v, 0, 0, 640, 360);
+            var dataUrl = c.toDataURL("image/jpeg", 0.75);
+            posterCache[att] = dataUrl;
+
+            // Inject into any rendered card thumbs waiting for this URL
+            var thumbs = root.querySelectorAll('[data-vidurl="'+att+'"]');
+            thumbs.forEach(function(thumb){
+              // Replace placeholder content with the real poster
+              var ph = thumb.querySelector(".thumbPlaceholder");
+              if(ph) ph.remove();
+              var img = document.createElement("img");
+              img.src = dataUrl;
+              img.alt = "";
+              img.style.cssText = "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;";
+              thumb.insertBefore(img, thumb.firstChild);
+              thumb.style.background = "#000";
+            });
+          } catch(e){}
+          try{ v.src = ""; }catch(e){}
+        };
+
+        v.onerror = function(){ try{ v.src = ""; }catch(e){} };
+        setTimeout(function(){ try{ v.src = ""; }catch(e){} }, 10000);
+      });
+    }
+
+    function updateStats(){
+      var now = new Date();
+      var weekAgo = new Date(now - 7*24*60*60*1000);
+
+      // New This Week — posts published in last 7 days
+      var newThisWeek = S.items.filter(function(i){
+        var d = new Date(i.publishDate||i.publishTime||0);
+        return d >= weekAgo;
+      }).length;
+
+      // Videos — uploaded video files OR links to video platforms (Zoom, Teams, YouTube, Stream)
+      var videoLinkPattern = /zoom\.us|teams\.microsoft\.com|youtube\.com|youtu\.be|microsoftstream\.com|sharepoint\.com.*\/(stream|video)/i;
+      var videos = S.items.filter(function(i){
+        return isVid(extOf(i.attachmentName||i.attachmentUrl))
+          || (i.link && videoLinkPattern.test(i.link));
+      }).length;
+
+      // Most Liked — find top liked post
+      var topLiked = S.items.slice().sort(function(a,b){ return (b.likeCount||0)-(a.likeCount||0); })[0];
+      var topLikedCount = topLiked ? (topLiked.likeCount||0) : 0;
+      var topLikedTitle = topLiked && topLikedCount > 0
+        ? topLiked.headline.slice(0,28)+(topLiked.headline.length>28?"…":"")
+        : "No likes yet";
+
+      var pw = $("#wbStatPosts");    if(pw) pw.textContent = newThisWeek;
+      var vw = $("#wbStatVideos");   if(vw) vw.textContent = videos;
+      var fw = $("#wbStatFeatured"); if(fw){
+        fw.textContent = topLikedCount > 0 ? "❤ "+topLikedCount : "—";
+      }
+      var fl = $("#wbStatFeaturedLbl"); if(fl) fl.textContent = topLikedTitle;
+    }
+
+    // ── Like / Unlike ─────────────────────────
+    // SVG thumb that CSS can color — emoji can't be recolored by CSS
+    var THUMB_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" style="flex-shrink:0;margin-right:2px;"><path d="M2 20h2a1 1 0 0 0 1-1v-9a1 1 0 0 0-1-1H2v11zm19.83-7.12c.11-.25.17-.52.17-.88v-2c0-1.1-.9-2-2-2h-5.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 2S9.58 6.5 9 7.03V19c0 .55.45 1 1 1h9c.83 0 1.54-.5 1.84-1.22l3.03-6.9z"/></svg>';
+
+    function updateLikeBtn(btn, liked, count){
+      if(!btn) return;
+      btn.innerHTML = THUMB_SVG + (count ? '<span style="font-size:12px;font-weight:700;">' + count + '</span>' : '');
+      btn.title = liked ? "Unlike" : "Like";
+      if(liked){ btn.classList.add("liked"); }
+      else { btn.classList.remove("liked"); }
+    }
+
+    function toggleLike(id, btn){
+      var item = S.items.filter(function(x){ return String(x.id) === String(id); })[0];
+      if(!item || !currentUser) return;
+
+      // Parse liked list from plain text column
+      var likedList = item.likedBy ? item.likedBy.split(",").map(function(s){ return s.trim(); }).filter(Boolean) : [];
+      var alreadyLiked = likedList.indexOf(currentUser) > -1;
+
+      if(alreadyLiked){
+        likedList = likedList.filter(function(u){ return u !== currentUser; });
+        item.likeCount = Math.max(0, item.likeCount - 1);
+      } else {
+        likedList.push(currentUser);
+        item.likeCount = item.likeCount + 1;
+      }
+      item.likedBy = likedList.join(",");
+      var nowLiked = !alreadyLiked;
+
+      // Update all like buttons for this post
+      root.querySelectorAll('[data-like="'+id+'"]').forEach(function(b){
+        updateLikeBtn(b, nowLiked, item.likeCount);
+      });
+      var rLike = $("#rLikeBtn");
+      if(rLike && rLike._likeId === String(id)){
+        updateLikeBtn(rLike, nowLiked, item.likeCount);
+      }
+
+      // Also keep localStorage in sync as a local cache
+      try{
+        var likedKey = "tmt_liked_"+currentUser.replace(/[^a-z0-9]/gi,"_");
+        var likedIds = JSON.parse(localStorage.getItem(likedKey)||"[]");
+        if(nowLiked){ if(likedIds.indexOf(String(id))<0) likedIds.push(String(id)); }
+        else { likedIds = likedIds.filter(function(x){ return x !== String(id); }); }
+        localStorage.setItem(likedKey, JSON.stringify(likedIds));
+      }catch(e){}
+
+      // Write both count and liked-by text to SP
+      var enc = encodeURIComponent(LIST_TITLE).replace(/%20/g," ");
+      getDigest().then(function(dg){
+        var p = {__metadata:{type:entityType}};
+        if(likeCountField) p[likeCountField] = item.likeCount;
+        if(likedByField)   p[likedByField]   = item.likedBy;
+        return spPost(api+"/web/lists/GetByTitle('"+enc+"')/items("+id+")", p, dg, "MERGE");
+      }).then(function(){
+
+      }).catch(function(e){
+        console.warn("[TMT] Like save failed:", e && e.message);
+      });
+    }
+
+    // ── Track View ────────────────────────────
+    // Fires silently when a post is opened. One view per user, background write.
+    function trackView(item){
+      if(!item || !currentUser) return;
+
+      // Check text column for cross-device deduplication
+      var viewedList = item.viewedBy ? item.viewedBy.split(",").map(function(s){ return s.trim(); }).filter(Boolean) : [];
+      if(viewedList.indexOf(currentUser) > -1) return; // already viewed
+
+      viewedList.push(currentUser);
+      item.viewCount = (item.viewCount || 0) + 1;
+      item.viewedBy = viewedList.join(",");
+
+      // Update visible view count
+      root.querySelectorAll('[data-viewcount="'+item.id+'"]').forEach(function(el){
+        el.textContent = "👁 " + item.viewCount;
+      });
+
+      // Also sync to localStorage
+      try{
+        var viewedKey = "tmt_viewed_"+currentUser.replace(/[^a-z0-9]/gi,"_");
+        var viewedIds = JSON.parse(localStorage.getItem(viewedKey)||"[]");
+        if(viewedIds.indexOf(String(item.id)) < 0){
+          viewedIds.push(String(item.id));
+          localStorage.setItem(viewedKey, JSON.stringify(viewedIds));
+        }
+      }catch(e){}
+
+      // Write both count and viewed-by text to SP
+      var enc2 = encodeURIComponent(LIST_TITLE).replace(/%20/g," ");
+      getDigest().then(function(dg){
+        var p = {__metadata:{type:entityType}};
+        if(viewCountField) p[viewCountField] = item.viewCount;
+        if(viewedByField)  p[viewedByField]  = item.viewedBy;
+        return spPost(api+"/web/lists/GetByTitle('"+enc2+"')/items("+item.id+")", p, dg, "MERGE");
+      }).catch(function(e){
+        console.warn("[TMT] View save failed:", e && e.message);
+      });
+    }
+
+    // ── Render grid ───────────────────────────
+    function renderGrid(){
+      var grid = $("#tmtGrid");
+      // Apply current view class
+      grid.className = S.view === "list" ? "grid listview" : "grid";
+      var items = filtered();
+
+      if(!items.length){
+        grid.innerHTML = '<div style="color:#5E8899;padding:10px 2px;">No posts yet. Click <strong style="color:#63DF4E;">＋ Post News</strong> to add one.</div>';
+        return;
+      }
+
+      grid.innerHTML = items.map(function(i){
+        var feat = ["yes","true","1"].indexOf(String(i.featured).toLowerCase()) > -1;
+        var vid  = isVid(extOf(i.attachmentName || i.attachmentUrl));
+        var isAuthor = !i.author || !currentUser || i.author === currentUser;
+        // Check liked state from SP text column (cross-device), fall back to localStorage
+        var likedFromSP = currentUser && i.likedBy && i.likedBy.split(",").map(function(s){ return s.trim(); }).indexOf(currentUser) > -1;
+        var likedKey2 = currentUser ? "tmt_liked_"+currentUser.replace(/[^a-z0-9]/gi,"_") : "";
+        var likedIds2 = []; try{ if(likedKey2) likedIds2 = JSON.parse(localStorage.getItem(likedKey2)||"[]"); }catch(e){}
+        var userLiked = likedFromSP || likedIds2.indexOf(String(i.id)) > -1;
+        var likeCount = i.likeCount || 0;
+        return '<div class="card" data-id="'+esc(i.id)+'">'
+          + thumbHtml(i)
+          + '<div class="cB">'
+            + '<div class="meta">'
+              + '<span class="badge">'+esc(i.category)+'</span>'
+              + (vid ? '<span class="badge secondary">Video</span>' : "")
+              + (feat ? '<span class="badge featured">⭐ Featured</span>' : "")
+            + '</div>'
+            + '<div class="h" title="'+esc(i.headline)+'">'+esc(i.headline)+'</div>'
+            + '<div class="b">'+esc(i.body)+'</div>'
+            + (i.author
+              ? '<div class="authorRow"><div class="avatar">'+esc(initials(i.author))+'</div>'
+                + '<div><div class="authorName">'+esc(i.author)+'</div>'
+                + '<div class="authorTime">'+esc(relTime(i.publishDate))+'</div></div></div>'
+              : "")
+          + '</div>'
+          + '<div class="cardFooter">'
+            + '<button class="iconBtn likeBtn'+(userLiked?" liked":"")+'" data-like="'+esc(i.id)+'" title="'+(userLiked?"Unlike":"Like")+'">'
+            + '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" style="flex-shrink:0;margin-right:2px;"><path d="M2 20h2a1 1 0 0 0 1-1v-9a1 1 0 0 0-1-1H2v11zm19.83-7.12c.11-.25.17-.52.17-.88v-2c0-1.1-.9-2-2-2h-5.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 2S9.58 6.5 9 7.03V19c0 .55.45 1 1 1h9c.83 0 1.54-.5 1.84-1.22l3.03-6.9z"/></svg>'
+            + (likeCount ? '<span style="font-size:12px;font-weight:700;">'+likeCount+'</span>' : '')
+            + '</button>'
+            + '<span style="font-size:11px;color:var(--txm);display:flex;align-items:center;gap:3px;padding:0 6px;" data-viewcount="'+esc(i.id)+'">'
+            + (i.viewCount ? '👁 '+i.viewCount : '') + '</span>'
+            + '<div style="flex:1;"></div>'
+            + (i.link ? '<button class="iconBtn" data-link="'+esc(i.link)+'" title="Open link">🔗</button>' : "")
+            + (isAuthor ? '<button class="iconBtn" data-edit="'+esc(i.id)+'" title="Edit">✏️</button>' : "")
+            + (isAuthor ? '<button class="iconBtn danger" data-del="'+esc(i.id)+'" title="Delete">✕</button>' : "")
+          + '</div>'
+          + '</div>';
+      }).join("");
+
+      // Kick off async thumbnail extraction — pops in without blocking the grid
+      setTimeout(function(){ extractVideoFrames(items); fetchOgImages(items); resolveGuidThumbnails(items); }, 0);
+      updateStats();
+
+      // Card click → read modal
+      grid.querySelectorAll(".card").forEach(function(card){
+        card.addEventListener("click", function(e){
+          if(!e.target.closest(".cardFooter")) openRead(card.getAttribute("data-id"));
+        });
+      });
+      // Like button
+      grid.querySelectorAll("[data-like]").forEach(function(b){
+        b.addEventListener("click", function(e){
+          e.stopPropagation();
+          toggleLike(b.getAttribute("data-like"), b);
+        });
+      });
+      // Link button
+      grid.querySelectorAll("[data-link]").forEach(function(b){
+        b.addEventListener("click", function(e){ e.stopPropagation(); window.open(b.getAttribute("data-link"),"_blank","noopener"); });
+      });
+      // Edit button
+      grid.querySelectorAll("[data-edit]").forEach(function(b){
+        b.addEventListener("click", function(e){
+          e.stopPropagation();
+          var it = S.items.filter(function(x){ return String(x.id) === b.getAttribute("data-edit"); })[0];
+          if(it) openEdit(it);
+        });
+      });
+      // Delete button
+      grid.querySelectorAll("[data-del]").forEach(function(b){
+        b.addEventListener("click", function(e){
+          e.stopPropagation();
+          var id  = b.getAttribute("data-del");
+          var it  = S.items.filter(function(x){ return String(x.id) === id; })[0];
+          var lbl = it ? '"'+it.headline+'"' : "this post";
+          if(!confirm("Delete "+lbl+"? This cannot be undone.")) return;
+          b.disabled = true;
+          getDigest().then(function(dg){
+            var enc = encodeURIComponent(LIST_TITLE).replace(/%20/g," ");
+            return spPost(api+"/web/lists/GetByTitle('"+enc+"')/items("+id+")", null, dg, "DELETE");
+          }).then(function(){ return loadItems(); })
+            .catch(function(err){ setStatus(err.message||"Delete failed.",true); b.disabled = false; });
+        });
+      });
+    }
+
+    // Build the correct URL to open an Office file in the browser viewer (?web=1)
+    function buildOfficeOpenUrl(attUrl){
+      var s = String(attUrl||"");
+      // Strip Teams-specific params that cause 403 outside Teams context
+      s = s.replace(/[?&](wdOrigin|wdExp|wdhostclicktime|wdLOR|wdPreviousSession|wdPreviousSessionSrc|TEAMS)[^&]*/gi, "")
+           .replace(/\?&/, "?").replace(/&&+/g, "&").replace(/[?&]$/, "");
+      if(/[?&]sourcedoc=/i.test(s)) return s; // already a Doc.aspx viewer URL
+      return s.split("?")[0] + "?web=1";       // direct file URL — force browser viewer
+    }
+
+    // ── Read modal ────────────────────────────
+    // Video: use inline <video> with the direct SP file URL (location.origin + serverRelativeUrl).
+    // This works because it's a same-origin request with existing SP session cookies —
+    // exactly how the reference Basecamp Video Hub works. If it still can't load after 6s,
+    // show a "Watch Video" link that opens stream.aspx in a new tab.
+    function openRead(id){
+      var item = null;
+      for(var i=0; i<S.items.length; i++){ if(String(S.items[i].id)===String(id)){ item=S.items[i]; break; } }
+      if(!item) return;
+
+      // Detect extension reliably — check attachmentName, then URL file param, then sharing link type char
+      var nameForExtR = item.attachmentName || "";
+      if(!nameForExtR && item.attachmentUrl){
+        var fp = item.attachmentUrl.match(/[?&]file=([^&]+)/i);
+        if(fp) nameForExtR = decodeURIComponent(fp[1]);
+      }
+      var ext = extOf(nameForExtR || item.attachmentUrl);
+      if(!isOff(ext) && !isVid(ext) && item.attachmentUrl){
+        var tc = item.attachmentUrl.match(/sharepoint\.com\/:([pwxb])(?:\/r)?:/i);
+        if(tc){ var tcM = {p:"pptx",w:"docx",x:"xlsx",b:"pdf"}; ext = tcM[tc[1].toLowerCase()]||ext; }
+        if(!isOff(ext) && /Doc2?\.aspx/i.test(item.attachmentUrl) && /sourcedoc=/i.test(item.attachmentUrl)){
+          ext = "pptx";
+        }
+      }
+      var vid = isVid(ext);
+      var vw  = $("#rVideoWrap");
+
+      if(vid && item.attachmentUrl){
+        // Build a clean same-origin URL: strip any existing origin prefix, use location.origin
+        var sr = srvRel(item.attachmentUrl);
+        var videoSrc  = esc(location.origin + sr);
+        var watchHref = esc(location.origin + sr); // direct URL, same as what plays inline
+        var cat = item.category || "General";
+        var col = catColor(cat);
+
+        vw.innerHTML =
+          '<div style="position:relative;padding-top:56.25%;background:#000;border-radius:12px;overflow:hidden;margin-bottom:16px;">'
+          + '<video id="rVid" controls autoplay playsinline'
+          + ' style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;">'
+          + '<source src="'+videoSrc+'" type="video/mp4">'
+          + '<source src="'+videoSrc+'" type="video/quicktime">'
+          + '</video>'
+          + '<div id="rVidFb" style="display:none;position:absolute;inset:0;flex-direction:column;'
+          + 'align-items:center;justify-content:center;gap:14px;background:linear-gradient(135deg,#01131D,#053347);text-align:center;padding:20px;">'
+          + '<div style="width:72px;height:72px;border-radius:50%;background:rgba(0,0,0,.5);border:2px solid rgba(255,255,255,.3);display:flex;align-items:center;justify-content:center;">'
+          + '<svg width="28" height="28" viewBox="0 0 24 24" fill="white" style="margin-left:4px"><path d="M8 5v14l11-7z"/></svg>'
+          + '</div>'
+          + '<div><div style="font-size:15px;font-weight:800;color:#E8F0F4;margin-bottom:4px;">Click to Watch Video</div>'
+          + '<div style="font-size:11px;color:#5E8899;">Opens in SharePoint Stream</div></div>'
+          + '<button onclick="window.open(\''+watchHref+'\',\'_blank\',\'noopener\')"'
+          + ' style="padding:10px 22px;background:#63DF4E;color:#032D42;border:none;border-radius:8px;'
+          + 'font-family:inherit;font-weight:800;font-size:14px;cursor:pointer;">▶ Watch Video</button>'
+          + '</div>'
+          + '</div>';
+
+        var ve = root.querySelector("#rVid");
+        var fb = root.querySelector("#rVidFb");
+        function showFb(){ if(ve) ve.style.display="none"; if(fb) fb.style.display="flex"; }
+        if(ve){
+          ve.onerror = showFb;
+          ve.addEventListener("stalled", function(){ setTimeout(function(){ if(ve.readyState < 2) showFb(); }, 3000); });
+          setTimeout(function(){ if(ve && ve.readyState === 0) showFb(); }, 6000);
+        }
+      } else if(item.attachmentUrl) {
+        // Strip sentinel prefixes from attachment name for display
+        var rawAttName = item.attachmentName || "";
+        var cleanAttName = rawAttName.replace(/^__thumb__/i,"").replace(/^__dual__[^\x1F]*\x1F/,"");
+        // If the cleaned name is empty or was just the sentinel, it's a thumbnail image
+        var isThumbSentinel = /^__thumb__/i.test(rawAttName);
+
+        var fpR = item.attachmentUrl.match(/[?&]file=([^&]+)/i);
+        var sr2, fileUrl;
+        if(/Doc2?\.aspx/i.test(item.attachmentUrl)){
+          // Doc.aspx viewer URLs — use directly
+          fileUrl = item.attachmentUrl;
+          sr2 = srvRel(item.attachmentUrl);
+        } else if(fpR){
+          // &file= param — reconstruct path from folder + filename using spShareToServerRel
+          var folderR = (spShareToServerRel(item.attachmentUrl.split("?")[0]) || srvRel(item.attachmentUrl.split("?")[0])).replace(/\/[^/]+$/,"");
+          sr2 = folderR + "/" + decodeURIComponent(fpR[1]);
+          fileUrl = location.origin + sr2;
+        } else if(/sharepoint\.com\/:/.test(item.attachmentUrl)){
+          // Sharing URL — extract real path
+          sr2 = spShareToServerRel(item.attachmentUrl) || srvRel(item.attachmentUrl);
+          fileUrl = location.origin + sr2;
+        } else {
+          sr2 = srvRel(item.attachmentUrl);
+          fileUrl = location.origin + sr2;
+        }
+
+        var fileName = esc(cleanAttName || ext.toUpperCase() + " file");
+        var isImg    = isThumbSentinel || ["jpg","jpeg","png","gif","webp","bmp","svg"].indexOf(ext) > -1;
+
+        // Always use the original stored URL for opening Office files —
+        // buildOfficeOpenUrl handles all URL formats correctly (sharing links, Doc.aspx, direct paths)
+        var openUrl = esc(isOff(ext) ? buildOfficeOpenUrl(item.attachmentUrl) : spStreamUrl(item.attachmentUrl, cleanAttName));
+
+        var previewHtml = "";
+
+        if(isImg){
+          // Images: show inline with fallback to open link button
+          previewHtml =
+            '<div style="margin-bottom:16px;border-radius:12px;overflow:hidden;background:#000;text-align:center;position:relative;">'
+            + '<img id="rAttImg" src="'+esc(fileUrl)+'" alt="'+fileName+'"'
+            + ' style="max-width:100%;max-height:480px;object-fit:contain;display:block;margin:0 auto;" />'
+            + '<div id="rImgFb" style="display:none;padding:32px;text-align:center;">'
+            + '<div style="font-size:13px;color:#5E8899;margin-bottom:12px;">Image could not load inline.</div>'
+            + '<button onclick="window.open(\''+esc(fileUrl)+'\',\'_blank\',\'noopener\')" style="padding:10px 20px;background:#63DF4E;color:#032D42;border:none;border-radius:8px;font-family:inherit;font-weight:800;font-size:14px;cursor:pointer;">🖼 Open Image</button>'
+            + '</div></div>';
+
+        } else if(isPdf(ext)){
+          previewHtml =
+            '<div style="margin-bottom:16px;border-radius:12px;overflow:hidden;border:1px solid #074D65;">'
+            + '<iframe src="'+esc(fileUrl)+'" style="width:100%;height:520px;border:none;display:block;background:#fff;">'
+            + '</iframe></div>';
+
+        } else if(isOff(ext)){
+          var fileIcons  = {ppt:"📊",pptx:"📊",doc:"📝",docx:"📝",xls:"📈",xlsx:"📈"};
+          var fileLabels = {ppt:"PowerPoint Presentation",pptx:"PowerPoint Presentation",
+            doc:"Word Document",docx:"Word Document",
+            xls:"Excel Spreadsheet",xlsx:"Excel Spreadsheet"};
+          var fIcon  = fileIcons[ext]  || "📄";
+          var fLabel = fileLabels[ext] || ext.toUpperCase();
+          var fColor = (ext==="pptx"||ext==="ppt") ? "#C43E1C"
+            : (ext==="docx"||ext==="doc") ? "#185ABD"
+            : (ext==="xlsx"||ext==="xls") ? "#107C41" : "#63DF4E";
+
+          // Use the original stored URL for the Office Online viewer
+          // buildOfficeOpenUrl handles all formats: sharing links, Doc.aspx, direct file URLs
+          var webOneUrl = esc(buildOfficeOpenUrl(item.attachmentUrl));
+
+          previewHtml =
+            // iframe attempt — no button here, it's now in the modal header
+            '<div style="margin-bottom:16px;border-radius:12px;overflow:hidden;border:1px solid #074D65;position:relative;">'
+            + '<iframe id="officeFrame" src="'+webOneUrl+'"'
+            + ' style="width:100%;height:540px;border:none;display:block;background:#f5f5f5;"'
+            + ' allowfullscreen></iframe>'
+            // Fallback card shown if iframe fails (SP sets X-Frame-Options)
+            + '<div id="officeFallback" style="display:none;position:absolute;inset:0;'
+            + 'background:linear-gradient(135deg,#01131D,#053347);flex-direction:column;'
+            + 'align-items:center;justify-content:center;gap:14px;padding:32px;">'
+            + '<div style="font-size:52px;">'+fIcon+'</div>'
+            + '<div style="font-size:14px;font-weight:800;color:#E8F0F4;text-align:center;">'+fileName+'</div>'
+            + '<div style="font-size:12px;color:'+fColor+';font-weight:700;">'+fLabel+'</div>'
+            + '<div style="font-size:11px;color:#5E8899;text-align:center;line-height:1.6;max-width:300px;">'
+            + 'Preview not available in this context.<br>Use the button above to open in SharePoint.</div>'
+            + '</div>'
+            + '</div>';
+
+          // Detect if iframe gets blocked — if it loads an error page or is empty after 4s, show fallback
+          setTimeout(function(){
+            var frame = root.querySelector("#officeFrame");
+            var fallback = root.querySelector("#officeFallback");
+            if(!frame || !fallback) return;
+            try{
+              // If SP blocked the iframe, contentDocument will be a blank/error page
+              var doc = frame.contentDocument || (frame.contentWindow && frame.contentWindow.document);
+              if(!doc || doc.title === "" || doc.body.innerHTML === ""){
+                fallback.style.display = "flex";
+                frame.style.display = "none";
+              }
+            }catch(e){
+              // Cross-origin block — means it DID load SP content (good!) so leave it
+            }
+          }, 4000);
+
+        } else {
+          // Unknown file type: show a download card
+          var extUpper = ext ? ext.toUpperCase() : "FILE";
+          previewHtml =
+            '<div style="margin-bottom:16px;padding:28px 20px;border-radius:12px;border:1px solid #074D65;'
+            + 'background:linear-gradient(135deg,#01131D,#053347);display:flex;align-items:center;gap:16px;">'
+            + '<div style="width:52px;height:52px;border-radius:10px;background:rgba(99,223,78,.12);border:1px solid rgba(99,223,78,.25);'
+            + 'display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;color:#63DF4E;flex-shrink:0;">'+extUpper+'</div>'
+            + '<div style="flex:1;min-width:0;"><div style="font-size:14px;font-weight:700;color:#E8F0F4;margin-bottom:4px;word-break:break-all;">'+fileName+'</div>'
+            + '<div style="font-size:11px;color:#5E8899;">Click "↗ Open in new tab" above to view this file</div></div>'
+            + '</div>';
+        }
+
+        vw.innerHTML = previewHtml;
+
+        // Wire image error fallback
+        if(isImg){
+          var rImg = root.querySelector("#rAttImg");
+          var rImgFb = root.querySelector("#rImgFb");
+          if(rImg && rImgFb){
+            rImg.onerror = function(){
+              rImg.style.display = "none";
+              rImgFb.style.display = "block";
+            };
+          }
+        }
+      } else if(item.link) {
+        var ogImg2 = ogCache[item.link];
+        var linkDomain = item.link.replace(/^https?:\/\/(www\.)?/,"").split("/")[0];
+
+        // YouTube video — embed player directly
+        var ytId = null;
+        var ytMatch2 = item.link.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+        if(ytMatch2) ytId = ytMatch2[1];
+
+        // SharePoint file link — treat like an Office attachment
+        var spLinkFile = !ytId && /sharepoint\.com/i.test(item.link) && (
+          /sharepoint\.com\/:([pwxb])(?:\/r)?:/i.test(item.link) ||
+          /\.(pptx?|docx?|xlsx?|pdf)(\?|$)/i.test(item.link) ||
+          /Doc2?\.aspx/i.test(item.link)
+        );
+
+        if(ytId){
+          vw.innerHTML =
+            '<div style="position:relative;padding-top:56.25%;margin-bottom:16px;border-radius:12px;overflow:hidden;">'
+            + '<iframe src="https://www.youtube.com/embed/'+esc(ytId)+'?rel=0&autoplay=0"'
+            + ' style="position:absolute;inset:0;width:100%;height:100%;border:none;"'
+            + ' allowfullscreen allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture">'
+            + '</iframe></div>';
+        } else if(spLinkFile){
+          // Use the cleaned URL (Teams params stripped by buildOfficeOpenUrl)
+          var spLinkExt2 = (function(){
+            var tc = item.link.match(/sharepoint\.com\/:([ pwxb]):(?:\/r)?:/i);
+            var m = {p:"pptx",w:"docx",x:"xlsx",b:"pdf"};
+            return (tc && m[tc[1].toLowerCase()]) || extOf(item.link) || "pptx";
+          })();
+          var spFileIcons2 = {ppt:"📊",pptx:"📊",doc:"📝",docx:"📝",xls:"📈",xlsx:"📈",pdf:"📄"};
+          var spFileLabels2 = {ppt:"PowerPoint",pptx:"PowerPoint",doc:"Word Document",docx:"Word Document",xls:"Excel",xlsx:"Excel",pdf:"PDF"};
+          var spFileIcon2 = spFileIcons2[spLinkExt2] || "📊";
+          var spFileLabel2 = spFileLabels2[spLinkExt2] || "SharePoint File";
+          var spIframeUrl = esc(buildOfficeOpenUrl(item.link));
+          previewHtml =
+            '<div style="margin-bottom:16px;border-radius:12px;overflow:hidden;border:1px solid #074D65;position:relative;">'
+            + '<iframe id="officeFrame" src="'+spIframeUrl+'" style="width:100%;height:540px;border:none;display:block;background:#f5f5f5;" allowfullscreen></iframe>'
+            + '<div id="officeFallback" style="display:none;position:absolute;inset:0;background:linear-gradient(135deg,#01131D,#053347);flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:32px;">'
+            + '<div style="font-size:52px;">'+spFileIcon2+'</div>'
+            + '<div style="font-size:14px;font-weight:800;color:#E8F0F4;text-align:center;">'+esc(spFileLabel2)+'</div>'
+            + '<div style="font-size:11px;color:#5E8899;text-align:center;line-height:1.6;max-width:300px;">Preview not available inline.<br>Use "↗ Open in new tab" above to view this file.</div>'
+            + '</div></div>';
+          vw.innerHTML = previewHtml;
+          setTimeout(function(){
+            var frame = root.querySelector("#officeFrame");
+            var fallback = root.querySelector("#officeFallback");
+            if(!frame || !fallback) return;
+            try{
+              var doc = frame.contentDocument || (frame.contentWindow && frame.contentWindow.document);
+              if(!doc || doc.title === "" || (doc.body && doc.body.innerHTML === "")){
+                fallback.style.display = "flex"; frame.style.display = "none";
+              }
+            }catch(e){ /* cross-origin = loaded fine */ }
+          }, 4000);
+        } else if(ogImg2){
+          vw.innerHTML =
+            '<div style="margin-bottom:16px;border-radius:12px;overflow:hidden;position:relative;background:#000;">'
+            + '<img src="'+esc(ogImg2)+'" alt="" style="width:100%;max-height:280px;object-fit:cover;display:block;" onerror="this.remove()" />'
+            + '<div style="position:absolute;bottom:0;left:0;right:0;padding:8px 14px;background:linear-gradient(transparent,rgba(0,0,0,.7));">'
+            + '<div style="font-size:10px;color:#9BB8C8;font-weight:700;">🔗 '+esc(linkDomain)+'</div>'
+            + '</div></div>';
+        } else {
+          // Show link card — either loading or no image found
+          var hasImage = (ogImg2 === undefined || ogImg2 === null); // undefined=not tried, null=in progress
+          var statusMsg = hasImage ? "Fetching preview…" : "No preview available";
+          vw.innerHTML =
+            '<div style="margin-bottom:16px;padding:18px 20px;border-radius:12px;border:1px solid #074D65;'
+            + 'background:linear-gradient(135deg,#01131D,#053347);display:flex;align-items:center;gap:14px;">'
+            + '<div style="font-size:28px;opacity:.5;flex-shrink:0;">🔗</div>'
+            + '<div>'
+            + '<div style="font-size:13px;font-weight:700;color:#9BB8C8;margin-bottom:2px;">'+esc(linkDomain)+'</div>'
+            + '<div id="rLinkStatus" style="font-size:11px;color:#5E8899;">'+statusMsg+'</div>'
+            + '</div></div>';
+
+          // If not yet attempted, fetch the og:image
+          if(ogImg2 === undefined){
+            ogCache[item.link] = null; // mark in-progress
+
+            var ytM2 = item.link.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+            if(ytM2){
+              // YouTube video — get thumbnail directly
+              var ytThumb2 = "https://img.youtube.com/vi/"+ytM2[1]+"/mqdefault.jpg";
+              ogCache[item.link] = ytThumb2;
+              vw.innerHTML =
+                '<div style="margin-bottom:16px;border-radius:12px;overflow:hidden;background:#000;">'
+                + '<img src="'+esc(ytThumb2)+'" alt="" style="width:100%;max-height:280px;object-fit:cover;display:block;" /></div>';
+            } else {
+              // Generic URL — try allorigins proxy with a 6s timeout
+              var fetchDone = false;
+              var fetchTimeout = setTimeout(function(){
+                if(fetchDone) return;
+                fetchDone = true;
+                ogCache[item.link] = "";
+                var s = root.querySelector("#rLinkStatus");
+                if(s) s.textContent = "No preview available";
+              }, 6000);
+
+              fetch("https://api.allorigins.win/get?url="+encodeURIComponent(item.link))
+                .then(function(r){ return r.json(); })
+                .then(function(d){
+                  if(fetchDone) return;
+                  fetchDone = true;
+                  clearTimeout(fetchTimeout);
+                  var html = d.contents||"";
+                  var m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
+                          || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+                  if(m && m[1]){
+                    ogCache[item.link] = m[1];
+                    vw.innerHTML =
+                      '<div style="margin-bottom:16px;border-radius:12px;overflow:hidden;position:relative;background:#000;">'
+                      + '<img src="'+esc(m[1])+'" alt="" style="width:100%;max-height:280px;object-fit:cover;display:block;" onerror="this.remove()" />'
+                      + '<div style="position:absolute;bottom:0;left:0;right:0;padding:8px 14px;background:linear-gradient(transparent,rgba(0,0,0,.7));">'
+                      + '<div style="font-size:10px;color:#9BB8C8;font-weight:700;">🔗 '+esc(linkDomain)+'</div>'
+                      + '</div></div>';
+                  } else {
+                    ogCache[item.link] = "";
+                    var s2 = root.querySelector("#rLinkStatus");
+                    if(s2) s2.textContent = "No preview available";
+                  }
+                }).catch(function(){
+                  if(fetchDone) return;
+                  fetchDone = true;
+                  clearTimeout(fetchTimeout);
+                  ogCache[item.link] = "";
+                  var s3 = root.querySelector("#rLinkStatus");
+                  if(s3) s3.textContent = "No preview available";
+                });
+            }
+          }
+        }
+      } else {
+        vw.innerHTML = "";
+      }
+
+      $("#rTitle").textContent = item.headline || "News";
+      var feat = ["yes","true","1"].indexOf(String(item.featured).toLowerCase()) > -1;
+
+      // Render meta as styled pills
+      var metaParts = [];
+      if(item.category) metaParts.push(item.category);
+      if(feat) metaParts.push("⭐ Featured");
+      if(item.publishDate) metaParts.push(fmtDate(item.publishDate));
+      if(item.author) metaParts.push(item.author);
+      $("#rMeta").innerHTML = metaParts.map(function(p){ return '<span>'+esc(p)+'</span>'; }).join("");
+
+      $("#rBody").innerHTML = linkify(item.body || "");
+
+      // Universal "Open ↗" button in modal header
+      var rOpenBtn = $("#rOpenBtn");
+      if(rOpenBtn){
+        var openHref = "", openLabel = "↗ Open in new tab";
+        if(item.attachmentUrl){
+          if(vid){
+            openHref = location.origin + srvRel(item.attachmentUrl);
+          } else if(isOff(ext)){
+            openHref = buildOfficeOpenUrl(item.attachmentUrl);
+          } else {
+            openHref = location.origin + srvRel(item.attachmentUrl);
+          }
+        } else if(item.link){
+          openHref = item.link;
+        }
+        rOpenBtn.innerHTML = openHref
+          ? '<button onclick="window.open(\''+esc(openHref).replace(/'/g,"\\'")+'\',\'_blank\',\'noopener\')"'
+            + ' style="display:inline-flex;align-items:center;gap:6px;padding:8px 18px;background:#63DF4E;'
+            + 'color:#032D42;border:none;border-radius:10px;font-family:inherit;font-weight:800;font-size:14px;'
+            + 'cursor:pointer;box-shadow:0 4px 16px rgba(99,223,78,.25);">↗ Open in new tab</button>'
+          : "";
+      }
+
+      var isAuthorRead = !item.author || !currentUser || item.author === currentUser;
+      var acts = [];
+      // Only show Open Link when there's a link AND it's different from the attachment
+      // (avoids duplicate "open" buttons when the SP file URL is stored in both fields)
+      if(item.link && item.attachmentUrl && normalizeUrl(item.link) !== normalizeUrl(item.attachmentUrl)){
+        acts.push('<button class="btnP" onclick="window.open(\''+esc(item.link).replace(/'/g,"\\'")+'\',\'_blank\',\'noopener\')" style="cursor:pointer;">Open Link →</button>');
+      }
+      $("#rActions").innerHTML = acts.join("");
+
+      // Edit button in footer
+      var rEditBtn = $("#rEditBtn");
+      if(rEditBtn){
+        rEditBtn.style.display = isAuthorRead ? "inline-flex" : "none";
+        rEditBtn.onclick = function(){ closeRead(); openEdit(item); };
+      }
+
+      // Like button in read modal footer
+      var rLikeBtn = $("#rLikeBtn");
+      if(rLikeBtn){
+        rLikeBtn._likeId = String(item.id);
+        var likedFromSP2 = currentUser && item.likedBy && item.likedBy.split(",").map(function(s){ return s.trim(); }).indexOf(currentUser) > -1;
+        var likedKey3 = currentUser ? "tmt_liked_"+currentUser.replace(/[^a-z0-9]/gi,"_") : "";
+        var likedIds3 = []; try{ if(likedKey3) likedIds3 = JSON.parse(localStorage.getItem(likedKey3)||"[]"); }catch(e){}
+        var isLiked2 = likedFromSP2 || likedIds3.indexOf(String(item.id)) > -1;
+        updateLikeBtn(rLikeBtn, isLiked2, item.likeCount);
+        rLikeBtn.onclick = function(){ toggleLike(item.id, null); };
+      }
+
+      // Share buttons — set hash URL for this post
+      var postUrl = location.href.split("#")[0] + "#post-" + item.id;
+
+      var copyBtn = $("#rCopyLink");
+      if(copyBtn) copyBtn.onclick = function(){
+        try{
+          if(navigator.clipboard && navigator.clipboard.writeText){
+            navigator.clipboard.writeText(postUrl).then(function(){ showToast("✓ Link copied to clipboard"); });
+          } else {
+            // Fallback for older browsers
+            var ta = document.createElement("textarea");
+            ta.value = postUrl; ta.style.position = "fixed"; ta.style.opacity = "0";
+            document.body.appendChild(ta); ta.select();
+            document.execCommand("copy"); document.body.removeChild(ta);
+            showToast("✓ Link copied to clipboard");
+          }
+        }catch(e){ showToast("⚠ Copy failed — try manually"); }
+      };
+
+      var emailBtn = $("#rEmailBtn");
+      if(emailBtn) emailBtn.onclick = function(){
+        var subject = encodeURIComponent("Base Camp: " + (item.headline || "News Update"));
+        var body = encodeURIComponent(
+          (item.headline || "") + "\n\n"
+          + (item.body ? item.body.slice(0, 300) + (item.body.length > 300 ? "…" : "") + "\n\n" : "")
+          + "Read more: " + postUrl
+        );
+        location.href = "mailto:?subject=" + subject + "&body=" + body;
+      };
+
+      // Set URL hash so this post is bookmarkable / shareable
+      try{ history.replaceState(null, "", location.href.split("#")[0] + "#post-" + item.id); }catch(e){}
+      $("#readMo").classList.add("on");
+
+      // Track view silently — fires once per user per post
+      trackView(item);
+    }
+
+    function closeRead(){
+      var v = root.querySelector("#rVid");
+      try{ if(v) v.pause(); }catch(e){}
+      try{ history.replaceState(null, "", location.href.split("#")[0]); }catch(e){}
+      $("#readMo").classList.remove("on");
+    }
+
+    function showToast(msg){
+      var t = $("#copyToast"); if(!t) return;
+      t.textContent = msg;
+      t.classList.add("show");
+      setTimeout(function(){ t.classList.remove("show"); }, 2500);
+    }
+
+    // ── Form helpers ──────────────────────────
+    function setStatus(msg, err){
+      var el = $("#moStatus"); if(!el) return;
+      if(!msg){ el.style.display = "none"; el.textContent = ""; return; }
+      el.style.display = "inline-flex";
+      el.style.color = err ? "rgba(248,113,113,.95)" : "var(--wasabi)";
+      el.style.background = err ? "rgba(248,113,113,.1)" : "rgba(99,223,78,.1)";
+      el.textContent = msg;
+    }
+
+    function resetUpload(){
+      S.file = null;
+      S.removeAttachment = false;
+      S.urlAttachment = null;
+      var spPrR = $("#fLinkSpPrompt"); if(spPrR) spPrR.style.display = "none";
+      var uz = $("#uZone"); if(uz){ uz.classList.remove("hf"); uz.style.display = ""; }
+      var uI = $("#uI");   if(uI) uI.textContent = "⬆";
+      var uTx= $("#uTx");  if(uTx) uTx.textContent = "Click to browse or drag a file here";
+      var uH = $("#uH");   if(uH)  uH.textContent = "PPT, PDF, video, image — uploads to the News folder";
+      var fInput_el = $("#fFile"); if(fInput_el){ fInput_el.value=""; fInput_el.style.display=""; }
+      var up = $("#uProg"); if(up) up.classList.remove("on");
+      var pf = $("#pFill"); if(pf) pf.style.width = "0%";
+      var pp = $("#pPct");  if(pp) pp.textContent = "0%";
+      var pl = $("#pLabel");if(pl) pl.textContent = "Uploading…";
+      var uCurrent = $("#uCurrent"); if(uCurrent) uCurrent.style.display = "none";
+    }
+
+    function openNewPost(){
+      S.editId = null;
+      $("#moTitle").textContent = "Post News";
+      $("#tmtPublish").textContent = "Publish";
+      $("#tmtDelete").style.display = "none";
+      $("#fHeadline").value = ""; $("#fBody").value = ""; $("#fLink").value = "";
+      $("#fFeatured").value = "No";
+      $("#fExpiresOn").value = "";
+      $("#fPublishDate").value = new Date().toLocaleDateString("en-US");
+      setStatus(""); resetUpload();
+      $("#tmtMo").classList.add("on");
+    }
+
+    function openEdit(item){
+      S.editId = item.id;
+      $("#moTitle").textContent = "Edit News";
+      $("#tmtPublish").textContent = "Save";
+      $("#tmtDelete").style.display = "inline-flex";
+      $("#fHeadline").value = item.headline || "";
+      $("#fBody").value = item.body || "";
+      $("#fLink").value = item.link || "";
+      $("#fFeatured").value = yn(item.featured);
+      $("#fExpiresOn").value = "";
+      $("#fPublishDate").value = item.publishDate
+        ? new Date(item.publishDate).toLocaleDateString("en-US")
+        : new Date().toLocaleDateString("en-US");
+      if(item.category) $("#fCategory").value = item.category;
+
+      // Show SP file prompt if link is a SP file and no attachment
+      var spPr = $("#fLinkSpPrompt");
+      if(spPr) spPr.style.display = (!item.attachmentUrl && item.link && isSpFileUrl(item.link)) ? "flex" : "none";
+
+      resetUpload();
+
+      // Show current attachment panel if one exists
+      var uCurrent = $("#uCurrent");
+      var uZone = $("#uZone");
+      if(item.attachmentName || item.attachmentUrl){
+        var rawName = item.attachmentName || item.attachmentUrl.split("/").pop().split("?")[0];
+        // Strip sentinel prefixes from display name
+        var displayName = rawName.replace(/^__thumb__/i,"").replace(/^__dual__[^\x1F]*\x1F/,"");
+        var ext2 = extOf(displayName);
+        var icon = isVid(ext2) ? "🎬" : isOff(ext2) ? "📊" : isPdf(ext2) ? "📄" : ["jpg","jpeg","png","gif","webp"].indexOf(ext2) > -1 ? "🖼️" : "📎";
+        var uCurrentIcon = $("#uCurrentIcon");
+        var uCurrentName = $("#uCurrentName");
+        if(uCurrentIcon) uCurrentIcon.textContent = icon;
+        if(uCurrentName) uCurrentName.textContent = displayName;
+        if(uCurrent){ uCurrent.style.display = "flex"; }
+        if(uZone){ uZone.style.display = "none"; }
+
+        // Remove button — clears attachment, shows upload zone
+        var uRemoveBtn = $("#uRemoveBtn");
+        if(uRemoveBtn){
+          uRemoveBtn.onclick = function(e){
+            e.stopPropagation();
+            S.file = null;
+            S.removeAttachment = true; // flag to clear attachment on save
+            if(uCurrent) uCurrent.style.display = "none";
+            if(uZone){ uZone.style.display = ""; }
+            var fFile = $("#fFile"); if(fFile){ fFile.value = ""; fFile.style.display = ""; }
+            setStatus("Attachment will be removed on save.");
+          };
+        }
+
+        // Replace button — keeps panel visible but shows file input overlay
+        var uReplaceBtn = $("#uReplaceBtn");
+        if(uReplaceBtn){
+          uReplaceBtn.onclick = function(e){
+            e.stopPropagation();
+            S.removeAttachment = false;
+            if(uCurrent) uCurrent.style.display = "none";
+            if(uZone){ uZone.style.display = ""; }
+            var fFile = $("#fFile"); if(fFile){ fFile.value = ""; fFile.style.display = ""; fFile.click(); }
+          };
+        }
+        setStatus("");
+      } else {
+        if(uCurrent) uCurrent.style.display = "none";
+        if(uZone) uZone.style.display = "";
+        setStatus("No attachment — one will be auto-generated from the link if provided.");
+      }
+
+      $("#tmtMo").classList.add("on");
+    }
+
+    function closeMo(){ $("#tmtMo").classList.remove("on"); }
+
+    function buildPayload(data){
+      var p = {__metadata:{type:entityType}};
+      p[fi("Title")||"Title"] = data.headline;
+      var h = fi("Headline"); if(h) p[h] = data.headline;
+      var b = fi("Body")||fi("Summary"); if(b) p[b] = data.body;
+      var l = fi("Link"); if(l) p[l] = data.link||"";
+      var c = fi("Category"); if(c) p[c] = data.category;
+      var f = fi("Featured");
+      if(f){ var ft=(fieldMap["Featured"]&&fieldMap["Featured"].t||"").toLowerCase();
+             var v=yn(data.featured); p[f]=ft.indexOf("boolean")>-1?(v==="Yes"):v; }
+      var pd = fi("Publish Date")||fi("PublishDate"); if(pd) p[pd] = data.pubIso||new Date().toISOString();
+      var ed = fi("Expires On")||fi("ExpiresOn");     if(ed) p[ed] = data.expIso||null;
+      return p;
+    }
+
+    function onPublish(){
+      var headline = $("#fHeadline").value.trim();
+      var body     = $("#fBody").value.trim();
+      if(!headline){ setStatus("Headline is required.",true); return; }
+      if(!body)    { setStatus("Body is required.",true);     return; }
+
+      var category = $("#fCategory").value || "General";
+      var featured = $("#fFeatured").value || "No";
+      var link     = normalizeUrl($("#fLink").value.trim());
+      var pubIso   = toIso($("#fPublishDate").value) || new Date().toISOString();
+      var expIso   = toIso($("#fExpiresOn").value);
+
+      $("#tmtPublish").disabled = true;
+      setStatus("Working…");
+
+      var enc = encodeURIComponent(LIST_TITLE).replace(/%20/g," ");
+
+      getDigest().then(function(dg){
+        if(S.file){
+          var up = $("#uProg"); if(up) up.classList.add("on");
+          setStatus("Uploading file…");
+          return uploadFile(S.file, dg).then(function(res){
+            return {dg:dg, attUrl:res.abs, attName:res.name};
+          });
+        }
+        return {dg:dg, attUrl:"", attName:""};
+      }).then(function(ctx){
+        var p = buildPayload({headline:headline, body:body, link:link, category:category,
+          featured:featured, pubIso:pubIso, expIso:expIso});
+        var au = fi("Attachment URL"), an = fi("Attachment Name");
+        if(S.editId){
+          // If user clicked Remove, explicitly clear the attachment fields
+          if(S.removeAttachment){ if(au) p[au]=""; if(an) p[an]=""; }
+          else if(S.file){ if(au) p[au]=ctx.attUrl; if(an) p[an]=ctx.attName; }
+          else if(S.urlAttachment){ if(au) p[au]=S.urlAttachment.url; if(an) p[an]=S.urlAttachment.name; }
+          setStatus("Saving…");
+          return spPost(api+"/web/lists/GetByTitle('"+enc+"')/items("+S.editId+")", p, ctx.dg, "MERGE");
+        } else {
+          if(au) p[au] = ctx.attUrl || (S.urlAttachment ? S.urlAttachment.url : "");
+        if(an) p[an] = ctx.attName || (S.urlAttachment ? S.urlAttachment.name : "");
+          setStatus("Publishing…");
+          return spPost(api+"/web/lists/GetByTitle('"+enc+"')/items", p, ctx.dg);
+        }
+      }).then(function(){
+        setStatus("Done!");
+        closeMo();
+        $("#tmtPublish").disabled = false;
+        return loadItems();
+      }).catch(function(e){
+        setStatus(e.message||"Save failed.", true);
+        $("#tmtPublish").disabled = false;
+      });
+    }
+
+    function onDelete(){
+      if(!S.editId) return;
+      if(!confirm("Delete this post? This cannot be undone.")) return;
+      $("#tmtDelete").disabled = true;
+      setStatus("Deleting…");
+      var enc = encodeURIComponent(LIST_TITLE).replace(/%20/g," ");
+      getDigest()
+        .then(function(dg){ return spPost(api+"/web/lists/GetByTitle('"+enc+"')/items("+S.editId+")", null, dg, "DELETE"); })
+        .then(function(){ $("#tmtDelete").disabled = false; closeMo(); return loadItems(); })
+        .catch(function(e){ setStatus(e.message||"Delete failed.", true); $("#tmtDelete").disabled = false; });
+    }
+
+    function onFileSelected(file){
+      if(!file) return;
+      S.file = file;
+      S.removeAttachment = false;
+      // Show the file in the current attachment panel
+      var ext3 = extOf(file.name);
+      var icon3 = isVid(ext3) ? "🎬" : isOff(ext3) ? "📊" : isPdf(ext3) ? "📄" : ["jpg","jpeg","png","gif","webp"].indexOf(ext3) > -1 ? "🖼️" : "📎";
+      var uZone = $("#uZone"); if(uZone) uZone.style.display = "none";
+      var uCurrent = $("#uCurrent"); if(uCurrent) uCurrent.style.display = "flex";
+      var uCurrentIcon = $("#uCurrentIcon"); if(uCurrentIcon) uCurrentIcon.textContent = icon3;
+      var uCurrentName = $("#uCurrentName"); if(uCurrentName) uCurrentName.textContent = file.name;
+      // Wire remove to cancel the new file selection
+      var uRemoveBtn = $("#uRemoveBtn");
+      if(uRemoveBtn){
+        uRemoveBtn.onclick = function(e){
+          e.stopPropagation();
+          S.file = null;
+          if(uCurrent) uCurrent.style.display = "none";
+          if(uZone){ uZone.style.display = ""; }
+          var fFile = $("#fFile"); if(fFile){ fFile.value = ""; fFile.style.display = ""; }
+          setStatus("");
+        };
+      }
+      // Wire replace button to pick a different file
+      var uReplaceBtn = $("#uReplaceBtn");
+      if(uReplaceBtn){
+        uReplaceBtn.onclick = function(e){
+          e.stopPropagation();
+          if(uCurrent) uCurrent.style.display = "none";
+          if(uZone){ uZone.style.display = ""; }
+          var fFile = $("#fFile"); if(fFile){ fFile.value = ""; fFile.style.display = ""; fFile.click(); }
+        };
+      }
+    }
+
+    // ── Render the UI shell ───────────────────
+    root.innerHTML = `
+<style>
+#tmtNewsApp{
+  --wasabi:#63DF4E;--wasabi-m:#4FC43E;--sn-green:#81B5A1;
+  --bg:#021E2E;--card:#053347;--card-h:#064A5F;--inp:#02263A;
+  --bdr:#0A5A72;--bdr-s:#074D65;--ib:#044355;
+  --tx:#E8F0F4;--tx2:#9BB8C8;--txm:#5E8899;
+  font-family:Calibri,'Segoe UI',sans-serif;
+}
+#tmtNewsApp *{box-sizing:border-box;}
+#tmtNewsApp .tmt-shell{position:relative;max-width:1320px;margin:0 auto;padding:22px 18px;background:var(--bg);border-radius:14px;border:1px solid rgba(255,255,255,.06);overflow:hidden;}
+#tmtNewsApp .amb{position:absolute;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
+#tmtNewsApp .amb::before{content:'';position:absolute;top:-18%;left:-8%;width:520px;height:520px;background:radial-gradient(circle,rgba(99,223,78,.06),transparent 70%);animation:aa1 22s ease-in-out infinite;}
+#tmtNewsApp .amb::after{content:'';position:absolute;bottom:-12%;right:-10%;width:480px;height:480px;background:radial-gradient(circle,rgba(74,158,255,.05),transparent 70%);animation:aa2 28s ease-in-out infinite;}
+@keyframes aa1{0%,100%{transform:translate(0,0)}50%{transform:translate(60px,52px)}}
+@keyframes aa2{0%,100%{transform:translate(0,0)}50%{transform:translate(-52px,-34px)}}
+#tmtNewsApp .hdr{position:relative;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px;}
+#tmtNewsApp .hdrL{display:flex;align-items:center;gap:14px;}
+#tmtNewsApp .mark{width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,var(--wasabi),var(--sn-green));box-shadow:0 4px 16px rgba(99,223,78,.25);font-size:20px;}
+#tmtNewsApp .ttl{font-size:26px;font-weight:800;color:var(--wasabi);line-height:1;}
+#tmtNewsApp .sub{font-size:13px;color:var(--txm);margin-top:3px;}
+#tmtNewsApp .hdrA{display:flex;gap:10px;align-items:center;}
+#tmtNewsApp .btnP{display:inline-flex;align-items:center;gap:8px;padding:10px 18px;background:var(--wasabi);color:#032D42;border:none;border-radius:10px;font-family:inherit;font-size:14px;font-weight:800;cursor:pointer;transition:all .18s;box-shadow:0 4px 16px rgba(99,223,78,.25);}
+#tmtNewsApp .btnP:hover{background:var(--wasabi-m);transform:translateY(-1px);}
+#tmtNewsApp .btnP:disabled{opacity:.5;cursor:not-allowed;transform:none;}
+#tmtNewsApp .btnS{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;background:var(--card);color:var(--tx);border:1px solid var(--bdr-s);border-radius:10px;font-family:inherit;font-size:14px;font-weight:700;cursor:pointer;text-decoration:none;}
+#tmtNewsApp .btnS:hover{background:var(--card-h);}
+#tmtNewsApp .btnD{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;background:transparent;color:rgba(248,113,113,.95);border:1px solid rgba(248,113,113,.35);border-radius:10px;font-family:inherit;font-size:14px;font-weight:800;cursor:pointer;}
+#tmtNewsApp .btnD:hover{background:rgba(248,113,113,.1);}
+#tmtNewsApp .bar{position:relative;z-index:1;display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:14px;}
+#tmtNewsApp .srch{flex:1;min-width:240px;position:relative;}
+#tmtNewsApp .srch input{width:100%;height:40px;padding:0 14px 0 38px;background:var(--card);border:1px solid var(--bdr-s);border-radius:10px;color:var(--tx);font-family:inherit;font-size:13px;outline:none;box-sizing:border-box;}
+#tmtNewsApp .srch input:focus{border-color:var(--wasabi);}
+#tmtNewsApp .srch .ico{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--txm);font-size:12px;pointer-events:none;}
+#tmtNewsApp select{height:40px;padding:0 32px 0 12px;background:var(--card);border:1px solid var(--bdr-s);border-radius:10px;color:var(--tx2);font-family:inherit;font-size:13px;cursor:pointer;outline:none;box-sizing:border-box;min-width:90px;}
+#tmtNewsApp .grid{position:relative;z-index:1;display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px;}
+#tmtNewsApp .card{background:var(--card);border:1px solid var(--bdr-s);border-radius:16px;overflow:hidden;transition:all .22s;box-shadow:0 4px 20px rgba(0,0,0,.35);cursor:pointer;display:flex;flex-direction:column;}
+#tmtNewsApp .card:hover{border-color:rgba(99,223,78,.45);transform:translateY(-3px);box-shadow:0 10px 44px rgba(0,0,0,.45);}
+#tmtNewsApp .thumb{height:200px;position:relative;overflow:hidden;flex-shrink:0;}
+#tmtNewsApp .thumb img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .3s;}
+#tmtNewsApp .card:hover .thumb img{transform:scale(1.03);}
+#tmtNewsApp .fallback{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--txm);font-size:13px;}
+#tmtNewsApp .playOverlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;}
+#tmtNewsApp .playBtn{width:52px;height:52px;border-radius:50%;background:rgba(0,0,0,.45);backdrop-filter:blur(8px);border:2px solid rgba(255,255,255,.35);display:flex;align-items:center;justify-content:center;transition:all .18s;}
+#tmtNewsApp .card:hover .playBtn{background:rgba(99,223,78,.25);border-color:var(--wasabi);transform:scale(1.08);}
+#tmtNewsApp .playBtn svg{width:20px;height:20px;fill:white;margin-left:3px;}
+#tmtNewsApp .cB{padding:14px 16px 10px;flex:1;display:flex;flex-direction:column;}
+#tmtNewsApp .meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;}
+#tmtNewsApp .badge{padding:3px 10px;border-radius:999px;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.5px;background:rgba(99,223,78,.15);color:var(--wasabi);border:1px solid rgba(99,223,78,.25);}
+#tmtNewsApp .badge.secondary{background:rgba(155,184,200,.1);color:var(--tx2);border-color:rgba(155,184,200,.15);}
+#tmtNewsApp .badge.featured{background:rgba(99,223,78,.22);border-color:rgba(99,223,78,.45);}
+#tmtNewsApp .h{font-size:16px;font-weight:900;margin-bottom:10px;line-height:1.25;color:var(--tx);}
+#tmtNewsApp .b{font-size:12.5px;color:var(--tx2);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;flex:1;}
+#tmtNewsApp .authorRow{display:flex;align-items:center;gap:10px;margin-top:12px;padding-top:10px;border-top:1px solid var(--bdr-s);}
+#tmtNewsApp .avatar{width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,var(--wasabi),#2CB84B);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:900;color:#032D42;flex-shrink:0;}
+#tmtNewsApp .authorName{font-size:13px;font-weight:700;color:var(--tx);}
+#tmtNewsApp .authorTime{font-size:11px;color:var(--txm);}
+#tmtNewsApp .cardFooter{display:flex;align-items:center;justify-content:flex-end;gap:6px;padding:10px 16px;border-top:1px solid rgba(10,90,114,.4);}
+#tmtNewsApp .iconBtn{width:34px;height:34px;border-radius:10px;border:1px solid var(--bdr-s);background:rgba(5,51,71,.6);color:var(--tx2);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;font-size:14px;transition:all .15s;}
+#tmtNewsApp .iconBtn:hover{background:var(--card-h);color:var(--tx);}
+#tmtNewsApp .iconBtn.danger{color:rgba(248,113,113,.85);border-color:rgba(248,113,113,.2);}
+#tmtNewsApp .iconBtn.danger:hover{background:rgba(248,113,113,.1);}
+#tmtNewsApp .mo{display:none;position:fixed;inset:0;background:rgba(2,14,20,.75);backdrop-filter:blur(6px);z-index:100000;align-items:center;justify-content:center;padding:12px;}
+#tmtNewsApp .mo.on{display:flex;}
+#tmtNewsApp .md{background:var(--ib);border:1px solid var(--bdr);border-radius:14px;width:100%;max-width:820px;height:calc(100vh - 24px);max-height:calc(100vh - 24px);display:flex;flex-direction:column;box-shadow:0 10px 44px rgba(0,0,0,.45);animation:mmi .22s ease;}
+@keyframes mmi{from{opacity:0;transform:scale(.975) translateY(10px)}}
+#tmtNewsApp .mh{display:flex;align-items:center;justify-content:space-between;padding:14px 22px;border-bottom:1px solid var(--bdr-s);flex-shrink:0;}
+#tmtNewsApp .mt{font-size:18px;font-weight:900;color:var(--wasabi);}
+#tmtNewsApp .mx{background:none;border:none;color:var(--txm);font-size:22px;cursor:pointer;}
+#tmtNewsApp .mx:hover{color:var(--tx);}
+#tmtNewsApp .mb{padding:18px 22px;overflow-y:auto;flex:1;}
+#tmtNewsApp .mf{display:flex;justify-content:flex-end;gap:10px;padding:12px 22px;border-top:1px solid var(--bdr-s);flex-wrap:wrap;flex-shrink:0;}
+#tmtNewsApp .fg{margin-bottom:12px;}
+#tmtNewsApp .fl{display:block;font-size:10px;font-weight:900;color:var(--tx2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.6px;}
+#tmtNewsApp .fi,#tmtNewsApp .fta{width:100%;padding:9px 12px;background:var(--inp);border:1px solid var(--bdr-s);border-radius:10px;color:var(--tx);font-family:inherit;font-size:13px;outline:none;}
+#tmtNewsApp .fi:focus,#tmtNewsApp .fta:focus{border-color:var(--wasabi);}
+#tmtNewsApp .fta{resize:vertical;min-height:80px;}
+#tmtNewsApp .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+#tmtNewsApp .hint{font-size:11px;color:var(--txm);margin-top:4px;line-height:1.4;}
+#tmtNewsApp .status{font-size:11px;color:var(--txm);min-height:18px;margin-top:6px;}
+#tmtNewsApp .uz{border:2px dashed var(--bdr);border-radius:12px;padding:16px 12px;text-align:center;cursor:pointer;transition:all .15s;position:relative;overflow:hidden;background:rgba(2,38,58,.25);}
+#tmtNewsApp .uz:hover,#tmtNewsApp .uz.dg{border-color:var(--wasabi);background:rgba(99,223,78,.04);}
+#tmtNewsApp .uz.hf{border-color:var(--wasabi);border-style:solid;background:rgba(99,223,78,.04);}
+#tmtNewsApp .ui{font-size:24px;margin-bottom:6px;opacity:.8;}
+#tmtNewsApp .utx{font-size:13px;color:var(--tx2);margin-bottom:2px;}
+#tmtNewsApp .uh{font-size:11px;color:var(--txm);}
+#tmtNewsApp .up{margin-top:10px;display:none;}
+#tmtNewsApp .up.on{display:block;}
+#tmtNewsApp .pb{height:5px;background:var(--inp);border-radius:3px;overflow:hidden;margin-bottom:4px;}
+#tmtNewsApp .pf{height:100%;background:linear-gradient(90deg,var(--wasabi),var(--sn-green));border-radius:3px;transition:width .15s;width:0%;}
+#tmtNewsApp .pt{font-size:11px;color:var(--txm);display:flex;justify-content:space-between;}
+/* ── Share / copy toast ── */
+#tmtNewsApp .copyToast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(20px);
+  background:#1a2f1a;border:1px solid var(--wasabi);color:var(--wasabi);padding:9px 20px;border-radius:8px;
+  font-size:12px;font-weight:700;opacity:0;pointer-events:none;transition:all .25s;z-index:200000;white-space:nowrap;}
+#tmtNewsApp .copyToast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+
+#tmtNewsApp .likeBtn{font-size:13px;gap:4px;min-width:36px;transition:background .12s,border-color .12s,color .12s;outline:none;color:var(--txm);}
+#tmtNewsApp .likeBtn:hover{color:#63DF4E;border-color:rgba(99,223,78,.4);background:rgba(99,223,78,.08);}
+#tmtNewsApp .likeBtn.liked,
+#tmtNewsApp .likeBtn.liked:hover,
+#tmtNewsApp .likeBtn.liked:focus,
+#tmtNewsApp .likeBtn.liked:active{color:#032D42 !important;border-color:#63DF4E !important;background:#63DF4E !important;outline:none;}
+
+/* ── List view ── */
+#tmtNewsApp .grid.listview{grid-template-columns:1fr;gap:6px;}
+#tmtNewsApp .grid.listview .card{flex-direction:row;border-radius:10px;}
+#tmtNewsApp .grid.listview .thumb{width:80px;height:64px;flex-shrink:0;border-radius:8px 0 0 8px;}
+#tmtNewsApp .grid.listview .card:hover{transform:none;border-color:rgba(99,223,78,.45);}
+#tmtNewsApp .grid.listview .cB{padding:10px 14px;flex-direction:row;align-items:center;gap:12px;flex:1;min-width:0;}
+#tmtNewsApp .grid.listview .meta{margin-bottom:0;flex-shrink:0;}
+#tmtNewsApp .grid.listview .h{font-size:14px;margin-bottom:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;}
+#tmtNewsApp .grid.listview .b{display:none;}
+#tmtNewsApp .grid.listview .authorRow{display:none;}
+#tmtNewsApp .grid.listview .cardFooter{padding:0 12px;border-top:none;flex-shrink:0;}
+
+/* ── Email icon on thumbnail ── */
+#tmtNewsApp .thumbShare{position:absolute;top:6px;right:6px;z-index:3;width:26px;height:26px;border-radius:6px;
+  background:rgba(2,14,20,.65);backdrop-filter:blur(4px);border:1px solid rgba(255,255,255,.15);
+  display:flex;align-items:center;justify-content:center;font-size:12px;cursor:pointer;
+  opacity:0;transition:opacity .18s;text-decoration:none;}
+#tmtNewsApp .card:hover .thumbShare{opacity:1;}
+
+/* ── Read modal content ── */
+#tmtNewsApp .readTitle{font-size:22px;font-weight:900;line-height:1.25;color:var(--tx);margin-bottom:10px;}
+#tmtNewsApp .readMeta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--bdr-s);}
+#tmtNewsApp .readMeta span{font-size:11px;color:var(--txm);background:rgba(255,255,255,.05);padding:3px 9px;border-radius:999px;border:1px solid var(--bdr-s);}
+#tmtNewsApp .readBody{font-size:14px;line-height:1.75;color:var(--tx2);white-space:pre-wrap;}
+#tmtNewsApp .readBody a{color:var(--wasabi);text-decoration:underline;}
+#tmtNewsApp .readActions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;padding-top:14px;border-top:1px solid var(--bdr-s);}
+
+/* ── Welcome banner ── */
+#tmtNewsApp .wb{background:linear-gradient(135deg,#032D42 0%,#044355 60%,#053a4f 100%);border:1px solid var(--bdr);border-radius:14px;padding:22px 24px;margin-bottom:16px;position:relative;overflow:hidden;}
+#tmtNewsApp .wb::before{content:'';position:absolute;top:-40%;right:-5%;width:300px;height:300px;background:radial-gradient(circle,rgba(99,223,78,.07),transparent 70%);pointer-events:none;}
+#tmtNewsApp .wb-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;}
+#tmtNewsApp .wb-title{font-size:18px;font-weight:900;color:var(--wasabi);margin-bottom:3px;}
+#tmtNewsApp .wb-sub{font-size:13px;color:var(--tx2);line-height:1.5;max-width:680px;}
+#tmtNewsApp .wb-close{background:none;border:none;color:var(--txm);font-size:18px;cursor:pointer;padding:2px 6px;border-radius:6px;line-height:1;flex-shrink:0;}
+#tmtNewsApp .wb-close:hover{color:var(--tx);background:rgba(255,255,255,.06);}
+#tmtNewsApp .wb-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:14px;}
+#tmtNewsApp .wb-card{background:rgba(2,30,46,.5);border:1px solid var(--bdr-s);border-radius:10px;padding:12px 14px;}
+#tmtNewsApp .wb-num{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:var(--wasabi);color:#032D42;font-size:11px;font-weight:900;margin-right:7px;flex-shrink:0;}
+#tmtNewsApp .wb-card-title{font-size:13px;font-weight:800;color:var(--tx);margin-bottom:4px;display:flex;align-items:center;}
+#tmtNewsApp .wb-card-body{font-size:11.5px;color:var(--txm);line-height:1.45;}
+#tmtNewsApp .wb-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px;}
+#tmtNewsApp .wb-stat{background:var(--card);border:1px solid var(--bdr-s);border-radius:10px;padding:14px 18px;display:flex;align-items:center;gap:12px;}
+#tmtNewsApp .wb-stat-icon{flex:0 0 36px;width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:900;line-height:1;}
+#tmtNewsApp .wb-stat-text{flex:1;min-width:0;}
+#tmtNewsApp .wb-stat-icon.g{background:rgba(99,223,78,.12);color:var(--wasabi);}
+#tmtNewsApp .wb-stat-icon.b{background:rgba(74,158,255,.12);color:#4A9EFF;}
+#tmtNewsApp .wb-stat-icon.p{background:rgba(255,184,0,.12);color:#FFB800;}
+#tmtNewsApp .wb-stat-val{font-size:24px;font-weight:900;color:var(--tx);line-height:1;}
+#tmtNewsApp .wb-stat-lbl{font-size:11px;color:var(--txm);margin-top:2px;font-weight:600;}
+#tmtNewsApp .wb-show{display:none;padding:5px 12px;background:var(--card);border:1px solid var(--bdr-s);border-radius:8px;color:var(--txm);font-family:inherit;font-size:11px;font-weight:700;cursor:pointer;margin-bottom:14px;}
+#tmtNewsApp .wb-show:hover{color:var(--tx);border-color:var(--bdr);}
+@media(max-width:820px){
+  #tmtNewsApp .wb-cards{grid-template-columns:1fr 1fr;}
+  #tmtNewsApp .wb-stats{grid-template-columns:1fr 1fr 1fr;}
+  #tmtNewsApp .tmt-shell{padding:16px 14px;}
+  #tmtNewsApp .row2{grid-template-columns:1fr;}
+  #tmtNewsApp .mo{padding:12px;align-items:flex-end;}
+  #tmtNewsApp .md{max-height:95vh;border-radius:14px 14px 0 0;}
+  #tmtNewsApp .fi,#tmtNewsApp .fta{padding:12px;font-size:16px;}
+  #tmtNewsApp select{height:44px;padding:0 36px 0 12px;font-size:16px;}
+}
+</style>
+
+<div class="tmt-shell">
+  <div class="amb"></div>
+  <div class="hdr">
+    <div class="hdrL">
+      <div class="mark">⛺</div>
+      <div><div class="ttl">Base Camp</div><div class="sub">TMT &amp; SI News Hub</div></div>
+    </div>
+    <div class="hdrA">
+      <button class="btnP" id="tmtAdd">＋ Post News</button>
+    </div>
+  </div>
+
+  <!-- Stats bar (always visible) -->
+  <div class="wb-stats" id="wbStats">
+    <div class="wb-stat"><div class="wb-stat-icon g">🗓</div><div class="wb-stat-text"><div class="wb-stat-val" id="wbStatPosts">—</div><div class="wb-stat-lbl">New This Week</div></div></div>
+    <div class="wb-stat"><div class="wb-stat-icon b">▶</div><div class="wb-stat-text"><div class="wb-stat-val" id="wbStatVideos">—</div><div class="wb-stat-lbl">Videos</div></div></div>
+    <div class="wb-stat" id="wbStatTopLiked" style="cursor:pointer;" title="Click to open most liked post"><div class="wb-stat-icon p">❤</div><div class="wb-stat-text"><div class="wb-stat-val" id="wbStatFeatured">—</div><div class="wb-stat-lbl" id="wbStatFeaturedLbl">Most Liked</div></div></div>
+  </div>
+
+  <!-- Welcome banner (dismissible) -->
+  <button class="wb-show" id="wbShow">ℹ Show Guide</button>
+  <div class="wb" id="wb">
+    <div class="wb-top">
+      <div>
+        <div class="wb-title">Welcome to Base Camp ⛺</div>
+        <div class="wb-sub">Our team's hub for news, updates, and resources. Post headlines, attach videos or files, and keep the TMT &amp; SI team informed and aligned.</div>
+      </div>
+      <button class="wb-close" id="wbClose" title="Dismiss">✕</button>
+    </div>
+    <div class="wb-cards">
+      <div class="wb-card"><div class="wb-card-title"><span class="wb-num">1</span>Post</div><div class="wb-card-body">Click <strong style="color:var(--wasabi)">＋ Post News</strong> to share an update, announcement, or resource with the team.</div></div>
+      <div class="wb-card"><div class="wb-card-title"><span class="wb-num">2</span>Attach</div><div class="wb-card-body">Attach a video, PowerPoint, PDF, or image to your post. Files open directly in SharePoint.</div></div>
+      <div class="wb-card"><div class="wb-card-title"><span class="wb-num">3</span>Organize</div><div class="wb-card-body">Set a category, type, and expiry date. Mark important posts as <strong style="color:var(--wasabi)">⭐ Featured</strong> to pin them to the top.</div></div>
+      <div class="wb-card"><div class="wb-card-title"><span class="wb-num">4</span>Find</div><div class="wb-card-body">Search by keyword or filter by category. Click any card to read the full post and open attachments.</div></div>
+    </div>
+  </div>
+
+  <div class="bar">
+    <div class="srch"><span class="ico">🔍</span><input id="tmtQ" placeholder="Search headlines, body, category…" /></div>
+    <select id="tmtSort"><option value="newest" selected>Newest</option><option value="oldest">Oldest</option></select>
+    <select id="tmtCat"></select>
+    <button class="btnS" id="tmtViewToggle" title="Toggle view" style="height:40px;padding:0 12px;font-size:16px;gap:0;flex-shrink:0;">⊞</button>
+  </div>
+  <div id="tmtGrid" class="grid"></div>
+</div>
+
+<!-- POST / EDIT MODAL -->
+<div class="mo" id="tmtMo"><div class="md">
+  <div class="mh"><div class="mt" id="moTitle">Post News</div><button class="mx" id="tmtMoClose">✕</button></div>
+  <div class="mb">
+    <div class="fg">
+      <label class="fl">Headline <span style="color:rgba(248,113,113,.8);">required</span></label>
+      <input class="fi" id="fHeadline" placeholder="e.g. Q1 Win — Accenture Lands on ServiceNow AI Platform" />
+      <div class="hint">Keep it short and specific. This is the first thing people read.</div>
+    </div>
+    <div class="fg">
+      <label class="fl">Body <span style="color:rgba(248,113,113,.8);">required</span></label>
+      <textarea class="fta" id="fBody" placeholder="What happened, why it matters, and what the team should know or do…"></textarea>
+      <div class="hint">Add context, key takeaways, or action items. URLs auto-link when reading.</div>
+    </div>
+    <div class="row2">
+      <div class="fg">
+        <label class="fl">Category</label>
+        <select class="fi" id="fCategory"></select>
+        <div class="hint">Helps the team filter by topic.</div>
+      </div>
+      <div class="fg">
+        <label class="fl">Featured</label>
+        <select class="fi" id="fFeatured"><option value="No">No</option><option value="Yes">Yes</option></select>
+        <div class="hint">Featured posts pin to the top of the feed.</div>
+      </div>
+    </div>
+    <div class="row2">
+      <div class="fg">
+        <label class="fl">Publish Date</label>
+        <input class="fi" id="fPublishDate" placeholder="mm/dd/yyyy" />
+        <div class="hint">Defaults to today. Backdate for historical posts.</div>
+      </div>
+      <div class="fg">
+        <label class="fl">Expires On <span style="color:var(--txm);font-weight:400;text-transform:none;">(optional)</span></label>
+        <input class="fi" id="fExpiresOn" placeholder="mm/dd/yyyy" />
+        <div class="hint">Post auto-hides after this date. Good for time-sensitive news.</div>
+      </div>
+    </div>
+    <div class="fg">
+      <label class="fl">Link <span style="color:var(--txm);font-weight:400;text-transform:none;">(optional)</span></label>
+      <input class="fi" id="fLink" placeholder="https://…" />
+      <div class="hint">YouTube, article, Salesforce opportunity, or any relevant URL. Thumbnail auto-generates for YouTube links.</div>
+      <!-- Smart SP file prompt — shown when a SharePoint file URL is detected -->
+      <div id="fLinkSpPrompt" style="display:none;margin-top:8px;padding:10px 14px;background:rgba(99,223,78,.07);border:1px solid rgba(99,223,78,.25);border-radius:10px;display:none;align-items:center;gap:10px;">
+        <div style="font-size:18px;flex-shrink:0;">📊</div>
+        <div style="flex:1;min-width:0;font-size:12px;color:var(--tx2);line-height:1.4;">
+          This looks like a SharePoint file. <strong style="color:var(--wasabi);">Use it as the attachment</strong> to get a slide thumbnail.
+        </div>
+        <button type="button" id="fLinkUseAsAtt"
+          style="flex-shrink:0;padding:6px 14px;background:var(--wasabi);color:#032D42;border:none;border-radius:8px;font-family:inherit;font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;">
+          Use as Attachment
+        </button>
+      </div>
+    </div>
+    <div class="fg">
+      <label class="fl">Attachment <span style="color:var(--txm);font-weight:400;text-transform:none;">(optional)</span></label>
+      <div class="hint" style="margin-bottom:8px;">Attach a video, PPT, PDF, or image. If no attachment is added, the thumbnail is auto-generated from the link above.</div>
+      <div class="uz" id="uZone">
+        <input type="file" id="fFile"
+          style="position:absolute;top:0;left:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:10;font-size:0;" />
+        <div class="ui" id="uI">⬆</div>
+        <div class="utx" id="uTx">Click to browse or drag a file here</div>
+        <div class="uh" id="uH">PPT, PDF, video, image — uploads to the News folder</div>
+      </div>
+      <!-- Current attachment display (shown in edit mode) -->
+      <div id="uCurrent" style="display:none;margin-top:8px;padding:10px 14px;background:var(--card);border:1px solid var(--bdr-s);border-radius:10px;align-items:center;gap:10px;">
+        <div id="uCurrentIcon" style="font-size:20px;flex-shrink:0;">📎</div>
+        <div style="flex:1;min-width:0;">
+          <div id="uCurrentName" style="font-size:13px;font-weight:700;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+          <div style="font-size:11px;color:var(--txm);margin-top:1px;">Current attachment</div>
+        </div>
+        <button id="uRemoveBtn" type="button" style="flex-shrink:0;padding:4px 10px;background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.3);border-radius:7px;color:rgba(248,113,113,.9);font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;">✕ Remove</button>
+        <button id="uReplaceBtn" type="button" style="flex-shrink:0;padding:4px 10px;background:rgba(99,223,78,.08);border:1px solid rgba(99,223,78,.25);border-radius:7px;color:var(--wasabi);font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;">↑ Replace</button>
+      </div>
+      <div class="up" id="uProg"><div class="pb"><div class="pf" id="pFill"></div></div><div class="pt"><span id="pLabel">Uploading…</span><span id="pPct">0%</span></div></div>
+    </div>
+  </div>
+  <div class="mf">
+    <div style="flex:1;display:flex;align-items:center;">
+      <span id="moStatus" style="font-size:12px;font-weight:700;min-height:0;margin:0;padding:5px 12px;
+        border-radius:8px;background:rgba(255,255,255,.06);display:none;"></span>
+    </div>
+    <button class="btnD" id="tmtDelete" style="display:none;">Delete</button>
+    <button class="btnS" id="tmtCancel">Cancel</button>
+    <button class="btnP" id="tmtPublish">Publish</button>
+  </div>
+</div></div>
+
+<!-- READ MODAL -->
+<div class="mo" id="readMo"><div class="md" style="max-width:900px;">
+  <div class="mh">
+    <div class="mt">Read</div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span id="rOpenBtn"></span>
+      <button class="mx" id="readCloseX">✕</button>
+    </div>
+  </div>
+  <div class="mb">
+    <div id="rVideoWrap"></div>
+    <div class="readTitle" id="rTitle"></div>
+    <div class="readMeta" id="rMeta"></div>
+    <div class="readBody" id="rBody"></div>
+    <div class="readActions" id="rActions"></div>
+  </div>
+  <div class="mf">
+    <div style="display:flex;gap:8px;flex:1;">
+      <button class="btnS" id="rCopyLink" title="Copy link to this post" style="gap:6px;">🔗 Copy Link</button>
+      <button class="btnS" id="rEmailBtn" title="Share via email" style="gap:6px;">📧 Email</button>
+      <button class="btnS likeBtn" id="rLikeBtn" style="gap:6px;min-width:52px;">Like</button>
+    </div>
+    <button class="btnS" id="rEditBtn" style="display:none;">✏️ Edit</button>
+    <button class="btnS" id="readCloseBtn">Close</button>
+  </div>
+</div></div>
+<div class="copyToast" id="copyToast">✓ Link copied to clipboard</div>`;
+
+    // ── Wire events ───────────────────────────
+    on($("#tmtAdd"),     "click",  openNewPost);
+
+    // Detect SharePoint file URLs in Link field and show "Use as Attachment" prompt
+    function isSpFileUrl(url){
+      return /sharepoint\.com/i.test(url) && (
+        /sharepoint\.com\/:([pwxb])(?:\/r)?:/i.test(url) ||
+        /\.(pptx?|docx?|xlsx?|pdf)(\?|$)/i.test(url) ||
+        /Doc2?\.aspx/i.test(url)
+      );
+    }
+    on($("#fLink"), "input", function(){
+      var val = (this.value||"").trim();
+      var prompt = $("#fLinkSpPrompt");
+      if(!prompt) return;
+      var show = val && isSpFileUrl(val) && !S.file && !S.urlAttachment;
+      prompt.style.display = show ? "flex" : "none";
+      // Update icon based on type char
+      var ico = prompt.querySelector("div");
+      if(ico && show){
+        var tc = val.match(/sharepoint\.com\/:([ pwxb]):/i);
+        var m = {p:"📊",w:"📝",x:"📈",b:"📄"};
+        ico.textContent = (tc && m[tc[1].toLowerCase()]) || (/Doc2?\.aspx/i.test(val) ? "📊" : "📎");
+      }
+    });
+    on($("#fLinkUseAsAtt"), "click", function(){
+      var linkVal = normalizeUrl(($("#fLink").value||"").trim());
+      if(!linkVal) return;
+      // Derive file type from sharing URL type character
+      var tc6 = linkVal.match(/sharepoint\.com\/:([ pwxb])(?:\/r)?:/i);
+      var tcMap6 = {p:"pptx",w:"docx",x:"xlsx",b:"pdf"};
+      var ext6 = (tc6 && tcMap6[tc6[1].toLowerCase()])
+        || (/\.(pptx?|docx?|xlsx?|pdf)(\?|$)/i.test(linkVal) ? extOf(linkVal) : null)
+        || "pptx";
+      var typeNames = {pptx:"PowerPoint",ppt:"PowerPoint",docx:"Word Document",doc:"Word Document",xlsx:"Excel",xls:"Excel",pdf:"PDF"};
+      var dispName6 = (typeNames[ext6] || "SharePoint File") + "." + ext6;
+      var icon6 = {pptx:"📊",ppt:"📊",docx:"📝",doc:"📝",xlsx:"📈",xls:"📈",pdf:"📄"}[ext6] || "📊";
+
+      S.file = null;
+      S.urlAttachment = {url: linkVal, name: dispName6};
+      S.removeAttachment = false;
+      var uZone = $("#uZone"); if(uZone) uZone.style.display = "none";
+      var uCurrent = $("#uCurrent"); if(uCurrent) uCurrent.style.display = "flex";
+      var uCurrentIcon = $("#uCurrentIcon"); if(uCurrentIcon) uCurrentIcon.textContent = icon6;
+      var uCurrentName = $("#uCurrentName"); if(uCurrentName) uCurrentName.textContent = dispName6;
+      var prompt = $("#fLinkSpPrompt"); if(prompt) prompt.style.display = "none";
+      setStatus("Saved as attachment — slide thumbnail will appear after saving.");
+      var uRemoveBtn = $("#uRemoveBtn");
+      if(uRemoveBtn) uRemoveBtn.onclick = function(e){
+        e.stopPropagation();
+        S.urlAttachment = null; S.file = null;
+        if(uCurrent) uCurrent.style.display = "none";
+        if(uZone) uZone.style.display = "";
+        var linkV = ($("#fLink").value||"").trim();
+        var pr = $("#fLinkSpPrompt");
+        if(pr) pr.style.display = (linkV && isSpFileUrl(linkV)) ? "flex" : "none";
+        setStatus("");
+      };
+    });
+    // Most Liked tile — click to open the top liked post
+    on($("#wbStatTopLiked"), "click", function(){
+      var top = S.items.slice().sort(function(a,b){ return (b.likeCount||0)-(a.likeCount||0); })[0];
+      if(top && (top.likeCount||0) > 0) openRead(top.id);
+    });
+    on($("#tmtQ"),       "input",  function(e){ S.q = e.target.value||""; renderGrid(); });
+    on($("#tmtSort"),    "change", function(e){ S.sort = e.target.value; renderGrid(); });
+    on($("#tmtCat"),     "change", function(e){ S.cat = e.target.value; renderGrid(); });
+    on($("#tmtViewToggle"), "click", function(){
+      S.view = S.view === "grid" ? "list" : "grid";
+      $("#tmtViewToggle").textContent = S.view === "list" ? "⊟" : "⊞";
+      renderGrid();
+    });
+    on($("#tmtMoClose"), "click",  closeMo);
+    on($("#tmtCancel"),  "click",  closeMo);
+    on($("#tmtPublish"), "click",  onPublish);
+    on($("#tmtDelete"),  "click",  onDelete);
+    on($("#readCloseX"), "click",  closeRead);
+    on($("#readCloseBtn"),"click", closeRead);
+    on($("#readMo"),     "click",  function(e){ if(e.target === $("#readMo")) closeRead(); });
+    on($("#tmtMo"),      "click",  function(e){ if(e.target === $("#tmtMo")) closeMo(); });
+
+    // Welcome banner dismiss / show
+    on($("#wbClose"), "click", function(){
+      var wb = $("#wb"), btn = $("#wbShow");
+      if(wb) wb.style.display = "none";
+      if(btn) btn.style.display = "inline-flex";
+    });
+    on($("#wbShow"), "click", function(){
+      var wb = $("#wb"), btn = $("#wbShow");
+      if(wb) wb.style.display = "";
+      if(btn) btn.style.display = "none";
+    });
+
+    // File input — overlaid directly, fires natively, no programmatic .click() needed
+    on($("#fFile"), "change", function(){ onFileSelected(this.files && this.files[0]); });
+    on($("#uZone"), "dragover",  function(e){ e.preventDefault(); $("#uZone").classList.add("dg"); });
+    on($("#uZone"), "dragleave", function(){  $("#uZone").classList.remove("dg"); });
+    on($("#uZone"), "drop", function(e){
+      e.preventDefault(); $("#uZone").classList.remove("dg");
+      var f = e.dataTransfer.files && e.dataTransfer.files[0];
+      if(f) onFileSelected(f);
+    });
+
+    // ── Init ──────────────────────────────────
+    loadMeta()
+      .then(function(){ return loadCurrentUser(); })
+      .then(function(){ return loadItems(); })
+      .then(function(){
+        if(!$("#tmtCat").value) $("#tmtCat").value = "All";
+        $("#tmtSort").value = "newest";
+        S.sort = "newest";
+        renderGrid();
+        // Auto-open post if URL contains #post-{id} (e.g. from a shared link)
+        var hashMatch = location.hash.match(/^#post-(\d+)$/);
+        if(hashMatch){
+          var targetId = hashMatch[1];
+          var target = S.items.filter(function(x){ return String(x.id) === targetId; })[0];
+          if(target) setTimeout(function(){ openRead(targetId); }, 300);
+        }
+      })
+      .catch(function(e){
+        var grid = $("#tmtGrid");
+        if(grid) grid.innerHTML = '<div style="color:rgba(248,113,113,.95);padding:10px 2px;font-size:13px;">'
+          + '⚠️ Could not load posts: ' + esc(e && e.message ? e.message : String(e))
+          + '<br><small style="color:#5E8899;">List: "'+LIST_TITLE+'" — check browser console (F12) for the full error URL and response.</small>'
+          + '</div>';
+      });
+  }
+})();
+</script>
